@@ -1,0 +1,5 @@
+name: AzureBranches
+version: "26.1.2-AB-0001"
+main: com.azurebranches.plugin.AzureBranchesPlugin
+api-version: "1.21"
+folia-supported: true

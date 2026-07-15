@@ -1,16 +1,36 @@
-# Ignore Gradle project-specific cache directory
-.gradle
+# Build
+build/
+.gradle/
+*.class
+*.jar
 
-# Ignore Gradle build output directory
-build
-
-/run
-
-/folia-server/build.gradle.kts
-/folia-server/src/minecraft
-/paper-server
-/folia-api/build.gradle.kts
-/paper-api
-/paper-api-generator
-
+# IDE
 .idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Paperweight generated / upstream
+folia-server/build/
+folia-server/src/minecraft/
+paper-server/
+paper-api/
+folia-api/
+build-data/
+PATCHES-LICENSE
+
+# Folia source clone
+folia-server/build/folia-src/
+
+# Old backups
+*.paperweight-bak
+*.maven
+
+# Temp
+_wip_io/
+
+# Paperweight task cache
+.gradle/folia-server/src/minecraft/

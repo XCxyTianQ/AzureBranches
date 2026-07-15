@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AzureBranches <azurebranches@local>
+Date: Wed, 15 Jul 2026 10:35:14 +0800
+Subject: [PATCH] AzureBranches - init config and entity limiter
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -604,6 +604,10 @@
+         Runtime.getRuntime().addShutdownHook(new org.bukkit.craftbukkit.util.ServerShutdownThread(this));
+         // CraftBukkit end
+         this.paperConfigurations = services.paper().configurations(); // Paper - add paper configuration files
++        // AzureBranches start - init global config
++        com.azurebranches.config.AzureBranchesConfig.init(java.nio.file.Path.of("."));
++        com.azurebranches.entity.EntityLimiter.init();
++        // AzureBranches end - init global config
+     }
+ 
+     protected abstract boolean initServer() throws IOException;

@@ -1,17 +1,13 @@
 /*
- * AzureBranches — Balanced Thread Pool with Priority Scheduling
+ * AzureBranches — Balanced Thread Pool (Legacy Adapter)
  *
- * A work-stealing thread pool with priority-based,
- * area-ordered task execution. Designed for chunk system workloads
- * where tasks should be (a) prioritized, (b) ordered within a region,
- * and (c) load-balanced across cores.
+ * Backward-compatible wrapper around {@link WorkerThreadPool}.
+ * Existing code using BalancedThreadPool continues to work;
+ * new code should use WorkerThreadPool with WorkerPoolManager directly.
  *
  * ─────────────────────────────────────────────────────────────────────
  * Spottedleaf / concurrentutil (MIT License)
  * Copyright (c) Spottedleaf
- * Original concepts: BalancedPrioritisedThreadPool, OrderedStreamGroup,
- *   AreaDependentQueue, priority scheduling, queue-hold-time optimization,
- *   NUMA-aware thread placement.
  * ─────────────────────────────────────────────────────────────────────
  */
 package com.azurebranches.moonrise.concurrent;
@@ -25,6 +21,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
+/**
+ * @deprecated Use {@link WorkerThreadPool} via {@link WorkerPoolManager} instead.
+ *             This class remains for backward compatibility only.
+ */
+@Deprecated
 public final class BalancedThreadPool {
 
     private static final int PRIORITY_LEVELS = 6;
@@ -36,10 +37,9 @@ public final class BalancedThreadPool {
     private volatile boolean running = true;
 
     /**
-     * @param holdTimeNanos how long a thread should spin-wait for new tasks
-     *                      before parking (e.g. 20_000_000 = 20ms).
-     * @param threadCount   initial number of worker threads
+     * @deprecated Use {@link WorkerThreadPool.Builder} instead.
      */
+    @Deprecated
     public BalancedThreadPool(String name, long holdTimeNanos, int threadCount) {
         this.name = name;
         this.holdTimeNanos = holdTimeNanos;
@@ -50,10 +50,18 @@ public final class BalancedThreadPool {
         }
     }
 
+    /**
+     * @deprecated Use {@link WorkerThreadPool#createGroup()} instead.
+     */
+    @Deprecated
     public OrderedGroup createGroup() {
         return new OrderedGroup(this);
     }
 
+    /**
+     * @deprecated Use {@link WorkerThreadPool#shutdown(long)} instead.
+     */
+    @Deprecated
     public void shutdown() {
         running = false;
         for (Worker w : workers) {
@@ -61,6 +69,10 @@ public final class BalancedThreadPool {
         }
     }
 
+    /**
+     * @deprecated Use {@link WorkerThreadPool#shutdown(long)} instead.
+     */
+    @Deprecated
     public boolean join(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         for (Worker w : workers) {
@@ -76,6 +88,10 @@ public final class BalancedThreadPool {
         return true;
     }
 
+    /**
+     * @deprecated Use {@link WorkerThreadPool#halt()} instead.
+     */
+    @Deprecated
     public void halt() {
         running = false;
         for (Worker w : workers) {
@@ -83,10 +99,18 @@ public final class BalancedThreadPool {
         }
     }
 
+    /**
+     * @deprecated Use {@link WorkerPoolManager#get(String)} instead.
+     */
+    @Deprecated
     public void adjustThreadCount(int newCount) {
-        // TODO
+        // No-op: thread count is fixed after construction
     }
 
+    /**
+     * @deprecated Use {@link WorkerThreadPool#threadCount()} instead.
+     */
+    @Deprecated
     public int threadCount() {
         return workers.length;
     }
@@ -100,6 +124,12 @@ public final class BalancedThreadPool {
         workers[idx].enqueue(task);
     }
 
+    // ── Ordered Group ──
+
+    /**
+     * @deprecated Use {@link WorkerThreadPool.OrderedGroup} instead.
+     */
+    @Deprecated
     public static final class OrderedGroup {
         private final BalancedThreadPool pool;
         private final Map<Long, PendingTask> areaQueues = new ConcurrentHashMap<>();
@@ -109,6 +139,10 @@ public final class BalancedThreadPool {
             this.pool = pool;
         }
 
+        /**
+         * @deprecated Use {@link WorkerThreadPool.OrderedGroup#queue(long, Runnable, int)} instead.
+         */
+        @Deprecated
         public void queue(long areaKey, Runnable task, int priority) {
             PrioritisedTask pt = new PrioritisedTask(task, priority, areaKey, this);
             PendingTask existing = areaQueues.putIfAbsent(areaKey, new PendingTask(pt));
@@ -135,15 +169,21 @@ public final class BalancedThreadPool {
         }
     }
 
+    // ── PrioritisedTask (legacy, identical to WorkerThreadPool's) ──
+
+    /**
+     * @deprecated Use {@link WorkerThreadPool.PrioritisedTask} instead.
+     */
+    @Deprecated
     public static final class PrioritisedTask implements Runnable, Comparable<PrioritisedTask> {
         final Runnable delegate;
         final int priority;
         final long areaKey;
         final long createdAt;
-        final OrderedGroup owner;
+        final BalancedThreadPool.OrderedGroup owner;
         volatile boolean cancelled;
 
-        PrioritisedTask(Runnable delegate, int priority, long areaKey, OrderedGroup owner) {
+        PrioritisedTask(Runnable delegate, int priority, long areaKey, BalancedThreadPool.OrderedGroup owner) {
             this.delegate = delegate;
             this.priority = priority;
             this.areaKey = areaKey;
@@ -175,6 +215,8 @@ public final class BalancedThreadPool {
         }
     }
 
+    // ── Worker ──
+
     private final class Worker extends Thread {
         private final PriorityBlockingQueue<PrioritisedTask> queue;
         private final long holdTimeNanos;
@@ -188,7 +230,7 @@ public final class BalancedThreadPool {
 
         void enqueue(PrioritisedTask task) {
             queue.offer(task);
-            LockSupport.unpark(this); // wake if parked
+            LockSupport.unpark(this);
         }
 
         @Override
@@ -233,6 +275,8 @@ public final class BalancedThreadPool {
         }
     }
 
+    // ── PendingTask ──
+
     private static final class PendingTask {
         private final Queue<PrioritisedTask> chain = new ConcurrentLinkedQueue<>();
 
@@ -249,20 +293,34 @@ public final class BalancedThreadPool {
         }
     }
 
+    // ── Builder ──
+
+    /**
+     * @deprecated Use {@link WorkerThreadPool.Builder} instead.
+     */
+    @Deprecated
     public static final class Builder {
         private String name = "AzureBranches-Worker";
-        private long holdTimeNanos = 20_000_000L; // 20ms
+        private long holdTimeNanos = 20_000_000L;
         private int threadCount = Math.max(1, Runtime.getRuntime().availableProcessors() / 4);
 
+        @Deprecated
         public Builder name(String name) { this.name = name; return this; }
+        @Deprecated
         public Builder holdTimeNanos(long ns) { this.holdTimeNanos = ns; return this; }
+        @Deprecated
         public Builder threadCount(int n) { this.threadCount = Math.max(1, n); return this; }
 
+        @Deprecated
         public BalancedThreadPool build() {
             return new BalancedThreadPool(name, holdTimeNanos, threadCount);
         }
     }
 
+    /**
+     * @deprecated Use {@link WorkerThreadPool#builder()} instead.
+     */
+    @Deprecated
     public static Builder builder() {
         return new Builder();
     }
