@@ -123,9 +123,21 @@ tasks.register("buildFolia") {
             }
         } catch (_: Exception) { /* remote fix optional */ }
 
-        // Step 2: build (skip tests)
-        println("=== Folia step 2/2: build ===")
-        check(sh(dir = foliaDir, cmd = *arrayOf(g, "build", "-x", "test", *args)) == 0)
+        // Re-copy AzureBranches sources: applyAllPatches regenerates
+        // src/minecraft/java from scratch, wiping the copy made in cloneFolia.
+        // They must be present for the 0009/0010 hooks to compile.
+        run {
+            val ourSrc = file("../azurebranches-common/src/main/java/com/azurebranches")
+            val theirSrc = File(foliaDir, "folia-server/src/minecraft/java/com/azurebranches")
+            if (ourSrc.exists()) {
+                copyDir(ourSrc, theirSrc)
+                println("  Re-copied AzureBranches sources after patches: com.azurebranches/**")
+            }
+        }
+
+        // Step 2: create runnable paperclip jar (compiles server + our hooks)
+        println("=== Folia step 2/2: createPaperclipJar ===")
+        check(sh(dir = foliaDir, cmd = *arrayOf(g, ":folia-server:createPaperclipJar", *args)) == 0)
 
         // Find paperclip JAR
         val libDirs = listOf(File(foliaDir, "build/libs"), File(foliaDir, "folia-server/build/libs"))

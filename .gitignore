@@ -1,6 +1,7 @@
 # Build
 build/
 .gradle/
+.gradle.zip
 *.class
 *.jar
 

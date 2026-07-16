@@ -29,19 +29,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
-/**
- * A priority-based, work-stealing thread pool for offloaded server work.
- *
- * <h3>Key Features</h3>
- * <ul>
- *   <li><b>Priority scheduling</b> — 6 levels with time-based aging</li>
- *   <li><b>Work stealing</b> — idle threads pull work from busy siblings</li>
- *   <li><b>Area ordering</b> — tasks within the same region serialize via
- *       {@link OrderedGroup}</li>
- *   <li><b>Graceful shutdown</b> — drain then halt with timeout</li>
- *   <li><b>Stats</b> — submitted, executed, stolen, rejected counters</li>
- * </ul>
- */
 public final class WorkerThreadPool {
 
     public static final int PRIORITY_LEVELS = 6;
@@ -132,14 +119,6 @@ public final class WorkerThreadPool {
         return lifecycleState == STATE_RUNNING;
     }
 
-    // ── Lifecycle ──
-
-    /**
-     * Graceful shutdown: stops accepting new tasks and drains the queue,
-     * waiting up to {@code timeoutMs} for workers to finish.
-     *
-     * @return true if all threads joined within timeout
-     */
     public boolean shutdown(long timeoutMs) {
         lifecycleState = STATE_DRAINING;
 
@@ -167,10 +146,6 @@ public final class WorkerThreadPool {
         return true;
     }
 
-    /**
-     * Immediate halt: interrupts all workers. Use when graceful shutdown
-     * is not needed or has timed out.
-     */
     public void halt() {
         lifecycleState = STATE_HALTED;
         for (Worker w : workers) {
@@ -222,15 +197,6 @@ public final class WorkerThreadPool {
         );
     }
 
-    // ── Ordered Group ──
-
-    /**
-     * An ordered task group backed by a {@link WorkerThreadPool}.
-     *
-     * <p>Tasks submitted with the same {@code areaKey} are executed
-     * sequentially in FIFO order; tasks with different keys may run
-     * concurrently across the pool's workers.
-     */
     public static final class OrderedGroup {
         private final WorkerThreadPool pool;
         private final Map<Long, PendingTask> areaQueues = new ConcurrentHashMap<>();
@@ -240,10 +206,6 @@ public final class WorkerThreadPool {
             this.pool = pool;
         }
 
-        /**
-         * Enqueue a task for the given area. If another task for the same
-         * area is already in-flight, this task chains behind it.
-         */
         public void queue(long areaKey, Runnable task, int priority) {
             PrioritisedTask pt = new PrioritisedTask(task, priority, areaKey, this);
             PendingTask existing = areaQueues.putIfAbsent(areaKey, new PendingTask(pt));
@@ -272,14 +234,6 @@ public final class WorkerThreadPool {
         }
     }
 
-    // ── Prioritised Task ──
-
-    /**
-     * A task with priority, area key, and aging support.
-     *
-     * <p>Priority aging: every 5 seconds, the effective priority improves
-     * by 1 level, preventing starvation of low-priority tasks.
-     */
     public static final class PrioritisedTask implements Runnable, Comparable<PrioritisedTask> {
         final Runnable delegate;
         final int priority;
@@ -319,8 +273,6 @@ public final class WorkerThreadPool {
             return Integer.compare(this.effectivePriority(), o.effectivePriority());
         }
     }
-
-    // ── Worker ──
 
     private final class Worker extends Thread {
         private final PriorityBlockingQueue<PrioritisedTask> queue;
@@ -386,8 +338,6 @@ public final class WorkerThreadPool {
         }
     }
 
-    // ── Pending Task Chain ──
-
     private static final class PendingTask {
         private final Queue<PrioritisedTask> chain = new ConcurrentLinkedQueue<>();
 
@@ -403,8 +353,6 @@ public final class WorkerThreadPool {
             return chain.poll();
         }
     }
-
-    // ── Builder ──
 
     public static final class Builder {
         private String name = "AzureBranches-Worker";
