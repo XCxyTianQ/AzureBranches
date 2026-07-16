@@ -142,6 +142,7 @@ tasks.register("buildFolia") {
         // Find paperclip JAR
         val libDirs = listOf(File(foliaDir, "build/libs"), File(foliaDir, "folia-server/build/libs"))
         val jar = libDirs.flatMap { it.listFiles()?.toList() ?: emptyList() }
+            .sortedBy { if (it.name.contains("paperclip")) 0 else 1 } // prefer paperclip over bundler
             .find { (it.name.contains("bundler") || it.name.contains("paperclip"))
                     && it.name.endsWith(".jar") && it.length() > 10_000_000 }
             ?: throw GradleException("Folia paperclip not found. Searched: $libDirs")

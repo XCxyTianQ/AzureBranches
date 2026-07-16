@@ -8,7 +8,7 @@ plugins { id("java") }
 
 allprojects {
     group = "com.azurebranches"
-    version = "26.1.2-AB-0001"
+    version = "26.1.2-AB-0002"
 
     repositories {
         mavenCentral()

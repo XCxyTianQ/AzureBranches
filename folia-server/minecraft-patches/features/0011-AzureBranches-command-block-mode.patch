@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AzureBranches <azurebranches@local>
+Date: Thu, 16 Jul 2026 15:58:18 +0800
+Subject: [PATCH] AzureBranches - command block execution mode
+ (SAFE/ACCESS/EXP)
+
+---
+ net/minecraft/world/level/BaseCommandBlock.java | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
+index a4ee52e..515b2be 100644
+--- a/net/minecraft/world/level/BaseCommandBlock.java
++++ b/net/minecraft/world/level/BaseCommandBlock.java
+@@ -91,7 +91,9 @@ public abstract class BaseCommandBlock {
+     }
+ 
+     public boolean performCommand(final ServerLevel level) {
+-        if (true) return false; // Folia - region threading
++        // AzureBranches start - command block execution mode (replaces Folia hard disable)
++        if (!com.azurebranches.command.CommandBlockSupport.shouldRun()) return false; // SAFE: keep Folia behaviour; ACCESS/EXP: execute on this region thread
++        // AzureBranches end - command block execution mode
+         if (level.getGameTime() == this.lastExecution) {
+             return false;
+         } else if ("Searge".equalsIgnoreCase(this.command)) {
+@@ -121,6 +123,12 @@ public abstract class BaseCommandBlock {
+                         // Paper end - ServerCommandEvent
+                     }
+                 } catch (Throwable var7) {
++                    // AzureBranches start - contain cross-region command failures (ACCESS/EXP) instead of crashing the region
++                    if (com.azurebranches.command.CommandBlockSupport.containFailure(this.command, var7)) {
++                        this.successCount = 0;
++                        return false;
++                    }
++                    // AzureBranches end - contain cross-region command failures
+                     CrashReport report = CrashReport.forThrowable(var7, "Executing command block");
+                     CrashReportCategory category = report.addCategory("Command to be executed");
+                     category.setDetail("Command", this::getCommand);

@@ -26,6 +26,9 @@ public final class AzureBranchesConfig {
     private double minSpeed;
     private boolean entityLimitsEnabled;
     private final Map<String, Map<String, Object>> entityLimitTypes = new LinkedHashMap<>();
+    private String commandBlocksMode;
+    private long expRemoteTimeoutMs;
+    private String expSuccessCountMode;
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
@@ -156,6 +159,9 @@ public final class AzureBranchesConfig {
         preloadRadius=getInt("chunk_io.predictive_load.preload_radius",3);
         minSpeed=getDouble("chunk_io.predictive_load.min_speed",4.0);
         entityLimitsEnabled=getBool("entity_limits.enabled",false);
+        commandBlocksMode=getString("command_blocks.mode","SAFE");
+        expRemoteTimeoutMs=getLong("command_blocks.exp.remote_timeout_ms",1000L);
+        expSuccessCountMode=getString("command_blocks.exp.success_count_mode","SUM");
         entityLimitTypes.clear();
         for (Map.Entry<String,Object> e : values.entrySet()) {
             if (e.getKey().startsWith("entity_limits.types.") && e.getValue() instanceof Map) {
@@ -168,6 +174,7 @@ public final class AzureBranchesConfig {
     private long getLong(String k, long d) { Object v=values.get(k); if(v instanceof Long)return(Long)v; if(v instanceof Double)return((Double)v).longValue(); return d; }
     private double getDouble(String k, double d) { Object v=values.get(k); if(v instanceof Double)return(Double)v; if(v instanceof Long)return((Long)v).doubleValue(); return d; }
     private boolean getBool(String k, boolean d) { Object v=values.get(k); if(v instanceof Boolean)return(Boolean)v; return d; }
+    private String getString(String k, String d) { Object v=values.get(k); return v!=null ? String.valueOf(v) : d; }
 
     private void writeDefaults() {
         setDefault("worker_pools.io.threads",(long)ioPoolThreads());
@@ -179,6 +186,9 @@ public final class AzureBranchesConfig {
         setDefault("chunk_io.predictive_load.preload_radius",3L);
         setDefault("chunk_io.predictive_load.min_speed",4.0);
         setDefault("entity_limits.enabled",false);
+        setDefault("command_blocks.mode","SAFE");
+        setDefault("command_blocks.exp.remote_timeout_ms",1000L);
+        setDefault("command_blocks.exp.success_count_mode","SUM");
     }
 
     private void setDefault(String key, Object value) { if(!values.containsKey(key))values.put(key,value); }
@@ -194,4 +204,7 @@ public final class AzureBranchesConfig {
     public double minSpeed() { return minSpeed; }
     public boolean entityLimitsEnabled() { return entityLimitsEnabled; }
     public Map<String, Map<String, Object>> entityLimitTypes() { return entityLimitTypes; }
+    public String commandBlocksMode() { return commandBlocksMode; }
+    public long expRemoteTimeoutMs() { return expRemoteTimeoutMs; }
+    public String expSuccessCountMode() { return expSuccessCountMode; }
 }
