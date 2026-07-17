@@ -11,6 +11,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.Path
+import java.time.Instant
 
 plugins { id("java-library") }
 
@@ -137,7 +138,34 @@ tasks.register("buildFolia") {
 
         // Step 2: create runnable paperclip jar (compiles server + our hooks)
         println("=== Folia step 2/2: createPaperclipJar ===")
-        check(sh(dir = foliaDir, cmd = *arrayOf(g, ":folia-server:createPaperclipJar", *args)) == 0)
+        // AzureBranches: patch brand & version identity before building paperclip
+        val serverBuildFile = File(foliaDir, "folia-server/build.gradle.kts")
+        val originalBuildContent = serverBuildFile.readText()
+        val patchedBuildContent = originalBuildContent
+            .replace("\"Brand-Id\" to \"papermc:folia\"", "\"Brand-Id\" to \"azurebranches\"")
+            .replace("\"Brand-Name\" to \"Folia\"", "\"Brand-Name\" to \"AzureBranches\"")
+            .replace("\"Specification-Title\" to \"Folia\"", "\"Specification-Title\" to \"AzureBranches\"")
+        serverBuildFile.writeText(patchedBuildContent)
+        println("  Patched server identity: AzureBranches")
+
+        // Build metadata env vars for proper version & timestamp
+        val now = Instant.now()
+        val buildEnv = mapOf(
+            "BUILD_NUMBER" to "0003",
+            "BUILD_STARTED_AT" to now.toString()
+        )
+
+        val pb = ProcessBuilder(g, ":folia-server:createPaperclipJar", *args)
+            .directory(foliaDir)
+            .redirectErrorStream(true)
+        pb.environment().putAll(buildEnv)
+        val p = pb.start()
+        p.inputStream.transferTo(System.out)
+        val exitCode = p.waitFor()
+
+        // Restore original build file
+        serverBuildFile.writeText(originalBuildContent)
+        check(exitCode == 0) { "createPaperclipJar failed with exit code $exitCode" }
 
         // Find paperclip JAR
         val libDirs = listOf(File(foliaDir, "build/libs"), File(foliaDir, "folia-server/build/libs"))
