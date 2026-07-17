@@ -33,7 +33,6 @@ public final class AzureBranchesConfig {
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
-        writeDefaults();
         load();
         readValues();
     }
@@ -63,7 +62,7 @@ public final class AzureBranchesConfig {
     private void load() throws IOException {
         values.clear();
         File file = filePath.toFile();
-        if (!file.exists()) { file.getParentFile().mkdirs(); writeFile(); return; }
+        if (!file.exists()) { file.getParentFile().mkdirs(); writeDefaults(); writeFile(); return; }
         String section = "";
         try (BufferedReader r = new BufferedReader(new FileReader(file))) {
             String line;
