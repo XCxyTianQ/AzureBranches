@@ -1,12 +1,12 @@
-# AzureBranches 🌊
+# AzureBranches 
 
-> 一个力求实现命令方块语义完整性与异步链式执行的 Folia 下游试验项目
+> 力求实现命令方块语义完整性与异步链式执行的 Folia 下游试验项目
 
 ## 关于本项目
 
 AzureBranches 并非对任何既有项目的复刻，而是一个独立的实验性 Folia 下游分支。我们的核心目标是：**在多线程 Regionized Ticking 模型下，尽可能恢复并保证命令方块的语义完整性**——让 `/setblock`、`/execute`、连锁方块、循环方块等核心机制在跨区域场景中正确工作。
 
-当前版本已实现 **三级命令方块执行模式**（SAFE / ACCESS / EXP），其中 EXP v2 引入了 **Walking/Waiting 分离**、**Continuation MVCC 继承** 与 **Walker 前瞻批量调度** 等架构设计。详见各 Release 的 Patch Notes 及配套技术文档。
+当前版本 **三级命令方块执行模式**（SAFE / ACCESS / EXP），其中 EXP v2 引入了 **Walking/Waiting 分离**、**Continuation MVCC 继承** 与 **Walker 前瞻批量调度** 等架构设计。详见各 Release 的 Patch Notes 。
 
 ## 灵感来源与致谢
 
