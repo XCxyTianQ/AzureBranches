@@ -64,6 +64,7 @@ public final class AzureBranchesConfig {
         File file = filePath.toFile();
         if (!file.exists()) { file.getParentFile().mkdirs(); writeDefaults(); writeFile(); return; }
         String section = "";
+        int parsedKeys = 0;
         try (BufferedReader r = new BufferedReader(new FileReader(file))) {
             String line;
             while ((line = r.readLine()) != null) {
@@ -78,10 +79,11 @@ public final class AzureBranchesConfig {
                 if (hash >= 0) raw = raw.substring(0, hash).trim();
                 String fullKey = section.isEmpty() ? key : section + "." + key;
                 Object val = parseValue(raw);
-                if (val != null) values.put(fullKey, val);
+                if (val != null) { values.put(fullKey, val); parsedKeys++; }
                 if (raw.startsWith("{") && raw.endsWith("}")) parseInlineTable(fullKey, raw);
             }
         }
+        if (parsedKeys == 0) { writeDefaults(); writeFile(); }
     }
 
     private Object parseValue(String raw) {
