@@ -1,61 +1,128 @@
 /*
- * AzureBranches - EXP Chain Support
+ * AzureBranches - EXP Chain Support (v2)
  *
  * Infrastructure for command_blocks.mode=EXP: suspendable / resumable command
  * block chains with true cross-region result semantics.
  *
- * Design (see docs / daily notes 2026-07-16):
- *  - A command block chain always runs on its home region thread (adjacent
- *    loaded chunks are always the same region: Folia merges nearby sections,
- *    gridExponent=4 => 16x16-chunk sections).
- *  - Only remote *effects* (far setblock / tp / summon, ...) leave the region.
- *    Folia routes them fire-and-forget, so vanilla-Folia success counts lie.
- *  - In EXP mode, patched "awaitable" commands register a pending
- *    CompletableFuture<Boolean> here while the command executes synchronously
- *    on the home thread. The chain walker (patch 0012) then SUSPENDS the chain
- *    and resumes it on the home region thread once all pending futures
- *    complete - nothing ever blocks.
+ * v2 changes from v1:
+ *   - IN_FLIGHT / tryBeginChain / endChain removed (replaced by ChainHead).
+ *   - registerRemote is retained for same-region fast-path commands.
+ *   - DeferredContext collects both completed futures AND pending remote
+ *     work items grouped by region, so the Walker can batch-dispatch.
+ *
+ * Design:
+ *   See ChainHead.java (traversal lifecycle), Continuation.java (chain
+ *   snapshots), and the 0012 patch (Walker implementation).
  *
  * Threading contract:
- *  - openContext/closeContext/registerRemote: home region thread only
- *    (thread-local; called during synchronous command execution).
- *  - Futures may be completed from any region thread.
- *  - tryBeginChain/endChain: home region thread of that chain.
+ *   - openContext/closeContext/registerRemote/registerDeferred: home region
+ *     thread only (thread-local; called during synchronous command execution).
+ *   - Futures may be completed from any region thread.
+ *   - ChainHead.startTraversal/endWalking/endTraversal: home region thread.
  *
- * Zero Minecraft-internal imports by design: levels are identity-keyed as
- * Object, block positions as long (BlockPos.asLong()).
+ * Zero Minecraft-internal imports by design.
  */
 package com.azurebranches.command;
 
 import com.azurebranches.config.AzureBranchesConfig;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class ExpChainSupport {
 
-    // ---- pending remote results (thread-local, per command execution) ----
+    // ================================================================
+    //  DeferredContext – per-command-block execution scope
+    // ================================================================
 
-    private static final ThreadLocal<List<CompletableFuture<Boolean>>> PENDING = new ThreadLocal<>();
+    /**
+     * A remote work item that must be dispatched to a target region.
+     * Collected during command execution, dispatched in batch by the Walker.
+     */
+    public static final class DeferredEntry {
+        /** Target region chunk X (>> 4). */
+        public final int targetCx;
+        /** Target region chunk Z (>> 4). */
+        public final int targetCz;
+        /** The actual work to run on the target region thread. */
+        public final Runnable remoteTask;
+        /** Future completed by the remote task. */
+        public final CompletableFuture<Boolean> resultFuture;
 
-    /** Open a collection scope before dispatching a command block command (EXP only). */
-    public static void openContext() {
-        PENDING.set(new ArrayList<>(4));
+        public DeferredEntry(final int targetCx, final int targetCz,
+                             final Runnable remoteTask,
+                             final CompletableFuture<Boolean> resultFuture) {
+            this.targetCx = targetCx;
+            this.targetCz = targetCz;
+            this.remoteTask = remoteTask;
+            this.resultFuture = resultFuture;
+        }
     }
 
     /**
-     * Called by awaitable-patched commands when they queue remote work.
-     * Returns null when no EXP chain context is active (plain ACCESS /
-     * player command / non-EXP execution) - callers must treat null as
-     * "behave exactly like vanilla Folia".
+     * Result of closing an EXP execution context: all futures (completed
+     * and pending) for aggregation, plus deferred entries grouped by
+     * target region for batch dispatch.
+     */
+    public static final class DeferredContext {
+        /** All futures registered during this command execution (local + remote). */
+        public final List<CompletableFuture<Boolean>> futures;
+
+        /** Cross-region deferred works, grouped by (cx, cz) region key. */
+        public final Map<Long, List<DeferredEntry>> deferredByRegion;
+
+        public DeferredContext(final List<CompletableFuture<Boolean>> futures,
+                               final Map<Long, List<DeferredEntry>> deferredByRegion) {
+            this.futures = Collections.unmodifiableList(futures);
+            this.deferredByRegion = Collections.unmodifiableMap(deferredByRegion);
+        }
+
+        public boolean hasPendingRemote() {
+            if (deferredByRegion.isEmpty()) return false;
+            for (final List<DeferredEntry> entries : deferredByRegion.values()) {
+                for (final DeferredEntry e : entries) {
+                    if (!e.resultFuture.isDone()) return true;
+                }
+            }
+            return false;
+        }
+
+        /** Pack region (cx, cz) into a single long key. */
+        public static long regionKey(final int cx, final int cz) {
+            return ((long) cx << 32) | (cz & 0xFFFF_FFFFL);
+        }
+    }
+
+    // ================================================================
+    //  Thread-local context (per command-block execution, EXP only)
+    // ================================================================
+
+    private static final ThreadLocal<List<CompletableFuture<Boolean>>> PENDING_FUTURES = new ThreadLocal<>();
+    private static final ThreadLocal<Map<Long, List<DeferredEntry>>> PENDING_DEFERRED = new ThreadLocal<>();
+
+    /** Open a collection scope before dispatching a command block command (EXP only). */
+    public static void openContext() {
+        PENDING_FUTURES.set(new ArrayList<>(4));
+        PENDING_DEFERRED.set(new HashMap<>(2));
+    }
+
+    /**
+     * Called by awaitable-patched commands when they need to register a
+     * CompletableFuture for result aggregation. Returns null when no EXP
+     * chain context is active.
+     *
+     * <p>Prefer {@link #registerDeferred} for new command patches; this
+     * method is kept for commands that self-dispatch and only need the
+     * future collected (legacy compatibility during transition).</p>
      */
     public static CompletableFuture<Boolean> registerRemote() {
-        final List<CompletableFuture<Boolean>> list = PENDING.get();
+        final List<CompletableFuture<Boolean>> list = PENDING_FUTURES.get();
         if (list == null) {
             return null;
         }
@@ -64,58 +131,69 @@ public final class ExpChainSupport {
         return future;
     }
 
-    /** Close the scope and return collected pending futures (possibly empty). */
-    public static List<CompletableFuture<Boolean>> closeContext() {
-        final List<CompletableFuture<Boolean>> list = PENDING.get();
-        PENDING.remove();
-        return list != null ? list : List.of();
+    /**
+     * Register a remote work item that may need deferred dispatch.
+     *
+     * @param sameRegion  true when the target position is in the same Folia region
+     * @param targetCx    target region chunk X (ignored if sameRegion)
+     * @param targetCz    target region chunk Z (ignored if sameRegion)
+     * @param remoteTask  the work to execute on the target region thread
+     * @return a CompletableFuture, or null when no EXP context is active
+     */
+    public static CompletableFuture<Boolean> registerDeferred(
+        final boolean sameRegion, final int targetCx, final int targetCz,
+        final Runnable remoteTask
+    ) {
+        final List<CompletableFuture<Boolean>> futures = PENDING_FUTURES.get();
+        if (futures == null) {
+            return null;
+        }
+        final CompletableFuture<Boolean> future = new CompletableFuture<>();
+        futures.add(future);
+
+        if (sameRegion) {
+            // Same region: execute immediately on this (home) thread
+            try {
+                remoteTask.run();
+                future.complete(Boolean.TRUE);
+            } catch (final Exception e) {
+                future.completeExceptionally(e);
+            }
+        } else {
+            // Cross region: store as deferred entry for batch dispatch
+            final Map<Long, List<DeferredEntry>> deferred = PENDING_DEFERRED.get();
+            if (deferred != null) {
+                final long key = DeferredContext.regionKey(targetCx, targetCz);
+                deferred.computeIfAbsent(key, k -> new ArrayList<>())
+                    .add(new DeferredEntry(targetCx, targetCz, remoteTask, future));
+            }
+        }
+        return future;
     }
 
+    /** Close the scope and return the collected context for the Walker. */
+    public static DeferredContext closeContext() {
+        final List<CompletableFuture<Boolean>> futures = PENDING_FUTURES.get();
+        PENDING_FUTURES.remove();
+        final Map<Long, List<DeferredEntry>> deferred = PENDING_DEFERRED.get();
+        PENDING_DEFERRED.remove();
+        return new DeferredContext(
+            futures != null ? futures : List.of(),
+            deferred != null ? deferred : Map.of()
+        );
+    }
+
+    /** True when an EXP execution context is currently active. */
     public static boolean isContextActive() {
-        return PENDING.get() != null;
+        return PENDING_FUTURES.get() != null;
     }
 
-    // ---- in-flight chain guard (repeating heads re-trigger every tick) ----
+    // ================================================================
+    //  Success-count aggregation (configurable, unchanged from v1)
+    // ================================================================
 
-    private record ChainKey(Object level, long headPos) {}
-
-    private static final Set<ChainKey> IN_FLIGHT = ConcurrentHashMap.newKeySet();
-
-    /**
-     * Mark a chain as in flight. Returns false when the same head is already
-     * running a suspended chain - the caller must skip this trigger.
-     */
-    public static boolean tryBeginChain(final Object level, final long headPos) {
-        return IN_FLIGHT.add(new ChainKey(level, headPos));
-    }
-
-    public static void endChain(final Object level, final long headPos) {
-        IN_FLIGHT.remove(new ChainKey(level, headPos));
-    }
-
-    /** Failsafe for level unload: drop all in-flight markers of a level. */
-    public static void dropLevel(final Object level) {
-        IN_FLIGHT.removeIf(key -> key.level() == level);
-    }
-
-    public static int inFlightCount() {
-        return IN_FLIGHT.size();
-    }
-
-    // ---- success-count aggregation strategy (configurable) ----
-
-    /**
-     * Aggregation strategy for commands whose remote effects span multiple
-     * regions (one future per remote region, e.g. /fill). Chain continuation
-     * criterion is uniformly "aggregate > 0".
-     */
     public enum SuccessCountMode {
-        /** successCount += number of successful remote ops (vanilla-like "blocks changed"). */
-        SUM,
-        /** Strict: success only when every remote op succeeded. */
-        ALL,
-        /** Lenient: success when at least one remote op succeeded. */
-        ANY
+        SUM, ALL, ANY
     }
 
     private static volatile String cachedModeRaw;
@@ -125,7 +203,7 @@ public final class ExpChainSupport {
         final String raw;
         try {
             raw = AzureBranchesConfig.get().expSuccessCountMode();
-        } catch (IllegalStateException e) {
+        } catch (final IllegalStateException e) {
             return SuccessCountMode.SUM;
         }
         final String cached = cachedModeRaw;
@@ -135,8 +213,10 @@ public final class ExpChainSupport {
         SuccessCountMode parsed;
         try {
             parsed = SuccessCountMode.valueOf(raw.trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException e) {
-            System.err.println("[AzureBranches] command_blocks.exp.success_count_mode: unknown value '" + raw + "', falling back to SUM");
+        } catch (final IllegalArgumentException e) {
+            System.err.println(
+                "[AzureBranches] command_blocks.exp.success_count_mode: unknown value '"
+                + raw + "', falling back to SUM");
             parsed = SuccessCountMode.SUM;
         }
         cachedModeRaw = raw;
@@ -144,15 +224,8 @@ public final class ExpChainSupport {
         return parsed;
     }
 
-    /**
-     * Aggregate remote results into a successCount contribution per the
-     * configured mode. Null results (timeout / cancelled) count as failure.
-     * The chain continues iff the returned value is &gt; 0.
-     */
     public static int aggregate(final List<Boolean> results) {
-        if (results.isEmpty()) {
-            return 0;
-        }
+        if (results.isEmpty()) return 0;
         int ok = 0;
         for (final Boolean b : results) {
             if (Boolean.TRUE.equals(b)) ok++;
@@ -164,32 +237,49 @@ public final class ExpChainSupport {
         };
     }
 
-    // ---- config / stats ----
+    // ================================================================
+    //  Config / stats
+    // ================================================================
 
     public static long remoteTimeoutMs() {
         try {
             return AzureBranchesConfig.get().expRemoteTimeoutMs();
-        } catch (IllegalStateException e) {
+        } catch (final IllegalStateException e) {
             return 1000L;
+        }
+    }
+
+    /** Maximum deferred entries per region per dispatch batch. */
+    public static int maxBatchSize() {
+        try {
+            return AzureBranchesConfig.get().expBatchMaxSize();
+        } catch (final IllegalStateException e) {
+            return 15;
         }
     }
 
     private static final AtomicLong suspended = new AtomicLong();
     private static final AtomicLong resumed = new AtomicLong();
     private static final AtomicLong timeouts = new AtomicLong();
+    private static final AtomicLong superseded = new AtomicLong();
 
     public static void onSuspend() { suspended.incrementAndGet(); }
     public static void onResume() { resumed.incrementAndGet(); }
+    public static void onSupersede() { superseded.incrementAndGet(); }
+
     public static void onTimeout(final String command) {
         final long n = timeouts.incrementAndGet();
         if (n == 1L || n % 50L == 0L) {
-            System.err.println("[AzureBranches] EXP chain remote result timeout (total " + n + "): '" + command + "'");
+            System.err.println(
+                "[AzureBranches] EXP chain remote result timeout (total " + n + "): '"
+                + command + "'");
         }
     }
 
     public static long suspendedCount() { return suspended.get(); }
     public static long resumedCount() { return resumed.get(); }
     public static long timeoutCount() { return timeouts.get(); }
+    public static long supersededCount() { return superseded.get(); }
 
     private ExpChainSupport() {}
 }

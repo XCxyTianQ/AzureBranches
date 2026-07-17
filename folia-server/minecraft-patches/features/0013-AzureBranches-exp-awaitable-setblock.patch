@@ -1,73 +1,84 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: AzureBranches <azurebranches@local>
-Date: Thu, 16 Jul 2026 17:06:27 +0800
-Subject: [PATCH] AzureBranches - EXP awaitable /setblock + same-region fast
- path
+Date: Thu, 17 Jul 2026 10:10:00 +0800
+Subject: [PATCH] AzureBranches - EXP awaitable /setblock v2 (registerDeferred)
+
+Changes from v1:
+  - Uses registerDeferred instead of manual registerRemote + queueOrExecuteTickTask.
+  - Same-region setblocks execute synchronously (fast path inside registerDeferred).
+  - Cross-region setblocks are registered for batch dispatch by the chain Walker.
+  - Error messages (CommandSyntaxException) are sent to source before rethrowing.
+  - The non-EXP path (ACCESS / player command / vanilla) is completely unchanged.
 
 ---
- .../server/commands/SetBlockCommand.java      |  5 ++++
- .../world/level/block/CommandBlock.java       | 23 +++++++++++++++----
- 2 files changed, 24 insertions(+), 4 deletions(-)
+ .../server/commands/SetBlockCommand.java      | 57 +++++++++++++++++++
+ 1 file changed, 57 insertions(+)
 
 diff --git a/net/minecraft/server/commands/SetBlockCommand.java b/net/minecraft/server/commands/SetBlockCommand.java
-index 582d977..3d96fb1 100644
+index 582d977..9c0e8f7 100644
 --- a/net/minecraft/server/commands/SetBlockCommand.java
 +++ b/net/minecraft/server/commands/SetBlockCommand.java
-@@ -112,6 +112,9 @@ public class SetBlockCommand {
+@@ -112,6 +112,63 @@ public class SetBlockCommand {
          final boolean strict
      ) throws CommandSyntaxException {
          ServerLevel level = source.getLevel();
-+        // AzureBranches start - EXP awaitable result (null unless inside an EXP command block chain)
-+        final java.util.concurrent.CompletableFuture<Boolean> abFuture = com.azurebranches.command.ExpChainSupport.registerRemote();
-+        // AzureBranches end
++        // AzureBranches start - EXP deferred dispatch (v2)
++        // When an EXP chain context is active, register the setblock work for
++        // deferred batch dispatch by the chain Walker. Same-region work executes
++        // synchronously on this thread (fast path); cross-region work is queued
++        // into a per-region batch and dispatched when the Walker reaches a batch
++        // boundary (conditional CB, max-batch-size, or end of chain).
++        if (com.azurebranches.command.ExpChainSupport.isContextActive()) {
++            final int targetCx = pos.getX() >> 4;
++            final int targetCz = pos.getZ() >> 4;
++            final int regionShift = io.papermc.paper.threadedregions.TickRegions.getRegionChunkShift();
++            final int homeCx = (int) source.getPosition().x >> 4;
++            final int homeCz = (int) source.getPosition().z >> 4;
++            final boolean sameRegion = (homeCx >> regionShift) == (targetCx >> regionShift)
++                                    && (homeCz >> regionShift) == (targetCz >> regionShift);
++
++            com.azurebranches.command.ExpChainSupport.registerDeferred(sameRegion, targetCx, targetCz, () -> {
++                try {
++                    if (level.isDebug()) {
++                        throw ERROR_FAILED.create();
++                    } else if (predicate != null && !predicate.test(new BlockInWorld(level, pos, true))) {
++                        throw ERROR_FAILED.create();
++                    } else {
++                        boolean placeNeeded;
++                        if (mode == SetBlockCommand.Mode.DESTROY) {
++                            level.destroyBlock(pos, true);
++                            placeNeeded = !block.getState().isAir() || !level.getBlockState(pos).isAir();
++                        } else {
++                            placeNeeded = true;
++                        }
++                        BlockState oldState = level.getBlockState(pos);
++                        if (placeNeeded
++                            && !block.place(level, pos,
++                                Block.UPDATE_CLIENTS
++                                | (strict ? Block.UPDATE_SKIP_ALL_SIDEEFFECTS
++                                          : Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS))) {
++                            throw ERROR_FAILED.create();
++                        } else {
++                            if (!strict) {
++                                level.updateNeighboursOnBlockSet(pos, oldState);
++                            }
++                            source.sendSuccess(() -> Component.translatable(
++                                "commands.setblock.success", pos.getX(), pos.getY(), pos.getZ()), true);
++                        }
++                    }
++                } catch (CommandSyntaxException ex) {
++                    // Send error to player even in deferred mode, then rethrow
++                    // so registerDeferred completes the future as failed
++                    sendMessage(source, ex);
++                    throw new RuntimeException(ex);
++                }
++            });
++            // Real result is in the future, aggregated by the Walker after batch dispatch.
++            // Return 1 consistently (matching Folia's fire-and-forget placeholder).
++            return 1;
++        }
++        // AzureBranches end - EXP deferred dispatch
++
          // Folia start - region threading
          io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
                  level, pos.getX() >> 4, pos.getZ() >> 4, () -> {
-@@ -140,11 +143,13 @@ public class SetBlockCommand {
-                 }
- 
-                 source.sendSuccess(() -> Component.translatable("commands.setblock.success", pos.getX(), pos.getY(), pos.getZ()), true);
-+                if (abFuture != null) abFuture.complete(Boolean.TRUE); // AzureBranches - EXP real result
-                 return; // Folia - region threading
-             }
-         }
-         // Folia start - region threading
-                 } catch (CommandSyntaxException ex) {
-+                    if (abFuture != null) abFuture.complete(Boolean.FALSE); // AzureBranches - EXP real result
-                     sendMessage(source, ex);
-                 }
-             });
-diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
-index 0539d79..60425ac 100644
---- a/net/minecraft/world/level/block/CommandBlock.java
-+++ b/net/minecraft/world/level/block/CommandBlock.java
-@@ -290,10 +290,25 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
-                             break;
-                         }
-                         if (!futures.isEmpty()) {
--                            st.direction = state.getValue(FACING);
--                            suspendChainExp(st, st.pos.immutable(), futures);
--                            suspended = true;
--                            return;
-+                            boolean allDone = true;
-+                            for (java.util.concurrent.CompletableFuture<Boolean> f : futures) {
-+                                if (!f.isDone()) { allDone = false; break; }
-+                            }
-+                            if (allDone) {
-+                                // Same-region fast path: results are already known. Apply the
-+                                // true outcome inline and keep walking - also prevents unbounded
-+                                // recursion from a synchronous suspend/resume round-trip.
-+                                java.util.List<Boolean> doneResults = new java.util.ArrayList<>(futures.size());
-+                                for (java.util.concurrent.CompletableFuture<Boolean> f : futures) {
-+                                    doneResults.add(!f.isCompletedExceptionally() ? f.getNow(Boolean.FALSE) : Boolean.FALSE);
-+                                }
-+                                baseCommandBlock.setSuccessCount(com.azurebranches.command.ExpChainSupport.aggregate(doneResults));
-+                            } else {
-+                                st.direction = state.getValue(FACING);
-+                                suspendChainExp(st, st.pos.immutable(), futures);
-+                                suspended = true;
-+                                return;
-+                            }
-                         }
-                         level.updateNeighbourForOutputSignal(st.pos, block);
-                     } else if (commandBlock.isConditional()) {

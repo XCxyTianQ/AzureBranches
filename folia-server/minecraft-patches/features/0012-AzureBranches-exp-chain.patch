@@ -1,22 +1,46 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: AzureBranches <azurebranches@local>
-Date: Thu, 16 Jul 2026 16:53:40 +0800
-Subject: [PATCH] AzureBranches - EXP suspendable command block chain
- (real-time)
+Date: Thu, 17 Jul 2026 09:50:00 +0800
+Subject: [PATCH] AzureBranches - EXP suspendable command block chain v2
+ (Walking/Waiting split + Continuation + batch dispatch)
 
 ---
- .../world/level/block/CommandBlock.java       | 117 ++++++++++++++++++
- 1 file changed, 117 insertions(+)
-
+ .../world/level/block/CommandBlock.java       | 234 +++++++++++++++++-
+ 1 file changed, 233 insertions(+), 1 deletion(-)
 diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
-index 1c96b29..0539d79 100644
+index b05a5a2..9a9337a 100644
 --- a/net/minecraft/world/level/block/CommandBlock.java
 +++ b/net/minecraft/world/level/block/CommandBlock.java
-@@ -190,6 +190,12 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+@@ -69,9 +69,14 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+         }
+     }
+ 
+-    private void setPoweredAndUpdate(final Level level, final BlockPos pos, final CommandBlockEntity commandBlock, final boolean isPowered) {
++    private void setPoweredAndUpdate(final Level level, final BlockPos pos, final CommandBlockEntity commandBlock, boolean isPowered) { // Paper - remove final from isPowered
+         boolean wasPowered = commandBlock.isPowered();
+         if (isPowered != wasPowered) {
++            // Paper start - Call BlockRedstoneEvent
++            if (!org.bukkit.craftbukkit.event.CraftEventFactory.callBinaryRedstoneChange(level, pos, isPowered)) {
++                return;
++            }
++            // Paper end - Call BlockRedstoneEvent
+             commandBlock.setPowered(isPowered);
+             if (isPowered) {
+                 if (commandBlock.isAutomatic() || commandBlock.getMode() == CommandBlockEntity.Mode.SEQUENCE) {
+@@ -129,7 +134,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+         final BlockState state, final Level level, final BlockPos pos, final Player player, final BlockHitResult hitResult
+     ) {
+         BlockEntity blockEntity = level.getBlockEntity(pos);
+-        if (blockEntity instanceof CommandBlockEntity && player.canUseGameMasterBlocks()) {
++        if (blockEntity instanceof CommandBlockEntity && (player.canUseGameMasterBlocks() || (player.isCreative() && player.getBukkitEntity().hasPermission("minecraft.commandblock")))) { // Paper - command block permission
+             player.openCommandBlock((CommandBlockEntity)blockEntity);
+             return InteractionResult.SUCCESS;
+         } else {
+@@ -185,6 +190,12 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
      }
  
      private static void executeChain(final ServerLevel level, final BlockPos blockPos, Direction direction) {
-+        // AzureBranches start - EXP suspendable chain (real-time re-read). Non-EXP keeps the vanilla loop verbatim.
++        // AzureBranches start - EXP suspendable chain (v2)
 +        if (com.azurebranches.command.CommandBlockSupport.mode() == com.azurebranches.command.CommandBlockSupport.Mode.EXP) {
 +            executeChainExp(level, blockPos, direction);
 +            return;
@@ -25,119 +49,221 @@ index 1c96b29..0539d79 100644
          BlockPos.MutableBlockPos pos = blockPos.mutable();
          GameRules gameRules = level.getGameRules();
          int maxIterations = gameRules.get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH);
-@@ -225,4 +231,115 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+@@ -220,4 +231,217 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
              LOGGER.warn("Command Block chain tried to execute more than {} steps!", limit);
          }
      }
 +
-+    // AzureBranches start - EXP suspendable chain implementation
-+    // Real-time: every step (initial and every resume) re-reads the world, matching
-+    // vanilla self-modifying chain semantics. Only a step that registers cross-region
-+    // remote futures suspends; a resume writes the real successCount into the block that
-+    // ran, updates its comparator, and continues the loop (which the next conditional
-+    // block reads via markConditionMet). While no command is awaitable-patched yet
-+    // (patch 0013), no futures are ever registered, so this behaves exactly like the
-+    // vanilla loop and never suspends.
-+    private static final class AzureChainState {
-+        final ServerLevel level;
-+        final BlockPos head;
-+        final BlockPos.MutableBlockPos pos;
-+        Direction direction;
-+        int remaining;
-+        AzureChainState(final ServerLevel level, final BlockPos head, final BlockPos.MutableBlockPos pos,
-+                        final Direction direction, final int remaining) {
-+            this.level = level; this.head = head; this.pos = pos;
-+            this.direction = direction; this.remaining = remaining;
-+        }
-+    }
++    // AzureBranches start - EXP suspendable chain implementation (v2)
 +
-+    private static void executeChainExp(final ServerLevel level, final BlockPos headPosBlock, final Direction direction) {
-+        if (!com.azurebranches.command.ExpChainSupport.tryBeginChain(level, headPosBlock.asLong())) {
-+            return; // a suspended chain from this head is still in flight
++    private static void executeChainExp(final ServerLevel level, final BlockPos headPosBlock,
++                                        final Direction direction) {
++        final com.azurebranches.command.ChainHead head =
++            com.azurebranches.command.ChainHead.resolve(level, headPosBlock.asLong());
++        final long traversalId = head.startTraversal();
++        if (traversalId < 0L) {
++            return;
 +        }
-+        stepChainExp(new AzureChainState(level, headPosBlock.immutable(), headPosBlock.mutable(), direction,
-+            level.getGameRules().get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH)));
-+    }
-+
-+    private static void stepChainExp(final AzureChainState st) {
-+        final ServerLevel level = st.level;
-+        boolean suspended = false;
 +        try {
-+            while (st.remaining-- > 0) {
-+                st.pos.move(st.direction);
-+                BlockState state = level.getBlockState(st.pos);
-+                Block block = state.getBlock();
-+                if (!state.is(Blocks.CHAIN_COMMAND_BLOCK)
-+                    || !(level.getBlockEntity(st.pos) instanceof CommandBlockEntity commandBlock)
-+                    || commandBlock.getMode() != CommandBlockEntity.Mode.SEQUENCE) {
++            walkExpChain(head, level, headPosBlock.immutable(), headPosBlock.mutable(), direction,
++                level.getGameRules().get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH));
++        } finally {
++            head.endWalking();
++        }
++    }
++
++    private static void walkExpChain(final com.azurebranches.command.ChainHead head,
++                                     final ServerLevel level, final BlockPos headBlock,
++                                     final BlockPos.MutableBlockPos pos, Direction direction,
++                                     final int remaining) {
++        final java.util.LinkedHashMap<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>
++            batchRegistry = new java.util.LinkedHashMap<>();
++        int batchStepCount = 0;
++        int walkRemaining = remaining;
++        BlockPos lastRunPos = null;
++        BlockPos firstBatchPos = null;
++
++        while (walkRemaining-- > 0) {
++            pos.move(direction);
++            final BlockState state = level.getBlockState(pos);
++
++            if (!state.is(Blocks.CHAIN_COMMAND_BLOCK)
++                || !(level.getBlockEntity(pos) instanceof final CommandBlockEntity commandBlock)
++                || commandBlock.getMode() != CommandBlockEntity.Mode.SEQUENCE) {
++                break;
++            }
++
++            if (commandBlock.isConditional() && !commandBlock.markConditionMet()) {
++                commandBlock.getCommandBlock().setSuccessCount(0);
++                break;
++            }
++
++            if (commandBlock.isPowered() || commandBlock.isAutomatic()) {
++                final BaseCommandBlock baseCommandBlock = commandBlock.getCommandBlock();
++
++                com.azurebranches.command.ExpChainSupport.openContext();
++                final boolean shouldContinue;
++                final com.azurebranches.command.ExpChainSupport.DeferredContext ctx;
++                try {
++                    shouldContinue = baseCommandBlock.performCommand(level);
++                } finally {
++                    ctx = com.azurebranches.command.ExpChainSupport.closeContext();
++                }
++
++                if (!shouldContinue) {
 +                    break;
 +                }
 +
-+                if (commandBlock.isPowered() || commandBlock.isAutomatic()) {
-+                    BaseCommandBlock baseCommandBlock = commandBlock.getCommandBlock();
-+                    if (commandBlock.markConditionMet()) {
-+                        com.azurebranches.command.ExpChainSupport.openContext();
-+                        boolean cont;
-+                        java.util.List<java.util.concurrent.CompletableFuture<Boolean>> futures;
-+                        try {
-+                            cont = baseCommandBlock.performCommand(level);
-+                        } finally {
-+                            futures = com.azurebranches.command.ExpChainSupport.closeContext();
-+                        }
-+                        if (!cont) {
-+                            break;
-+                        }
-+                        if (!futures.isEmpty()) {
-+                            st.direction = state.getValue(FACING);
-+                            suspendChainExp(st, st.pos.immutable(), futures);
-+                            suspended = true;
-+                            return;
-+                        }
-+                        level.updateNeighbourForOutputSignal(st.pos, block);
-+                    } else if (commandBlock.isConditional()) {
-+                        baseCommandBlock.setSuccessCount(0);
-+                    }
++                if (firstBatchPos == null) {
++                    firstBatchPos = pos.immutable();
 +                }
++                lastRunPos = pos.immutable();
 +
-+                st.direction = state.getValue(FACING);
++                if (!ctx.deferredByRegion.isEmpty()) {
++                    for (final java.util.Map.Entry<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>
++                         e : ctx.deferredByRegion.entrySet()) {
++                        batchRegistry.computeIfAbsent(e.getKey(), k -> new java.util.ArrayList<>())
++                            .addAll(e.getValue());
++                    }
++                    batchStepCount++;
++
++                    final boolean conditionalBoundary = commandBlock.isConditional();
++                    final boolean sizeBoundary =
++                        batchStepCount >= com.azurebranches.command.ExpChainSupport.maxBatchSize();
++
++                    if (conditionalBoundary || sizeBoundary) {
++                        dispatchAndSuspend(head, level, headBlock, firstBatchPos, pos.immutable(),
++                            direction, walkRemaining, batchRegistry, batchStepCount);
++                        return;
++                    }
++                } else {
++                    final java.util.List<Boolean> inlineResults =
++                        new java.util.ArrayList<>(ctx.futures.size());
++                    for (final java.util.concurrent.CompletableFuture<Boolean> f : ctx.futures) {
++                        inlineResults.add(
++                            !f.isCompletedExceptionally() ? f.getNow(Boolean.FALSE) : Boolean.FALSE);
++                    }
++                    baseCommandBlock.setSuccessCount(
++                        com.azurebranches.command.ExpChainSupport.aggregate(inlineResults));
++                    level.updateNeighbourForOutputSignal(pos, state.getBlock());
++                }
 +            }
 +
-+            if (st.remaining <= 0) {
-+                int limit = Math.max(level.getGameRules().get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH), 0);
-+                LOGGER.warn("Command Block chain tried to execute more than {} steps!", limit);
-+            }
-+        } finally {
-+            if (!suspended) {
-+                com.azurebranches.command.ExpChainSupport.endChain(level, st.head.asLong());
-+            }
++            direction = state.getValue(FACING);
++        }
++
++        if (walkRemaining <= 0 && batchRegistry.isEmpty()) {
++            final int limit = Math.max(level.getGameRules().get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH), 0);
++            LOGGER.warn("Command Block chain tried to execute more than {} steps!", limit);
++        }
++
++        if (!batchRegistry.isEmpty()) {
++            dispatchAndSuspend(head, level, headBlock, firstBatchPos, lastRunPos, direction,
++                walkRemaining, batchRegistry, batchStepCount);
++        } else {
++            head.endTraversal();
 +        }
 +    }
 +
-+    private static void suspendChainExp(final AzureChainState st, final BlockPos runPos,
-+                                        final java.util.List<java.util.concurrent.CompletableFuture<Boolean>> futures) {
++    private static void dispatchAndSuspend(
++        final com.azurebranches.command.ChainHead head,
++        final ServerLevel level, final BlockPos headBlock,
++        final BlockPos firstBatchPos, final BlockPos lastRunPos,
++        final Direction currentDirection, final int remaining,
++        final java.util.LinkedHashMap<Long,
++            java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>> batchRegistry,
++        final int batchStepCount) {
++
 +        com.azurebranches.command.ExpChainSupport.onSuspend();
-+        final ServerLevel level = st.level;
-+        final java.util.concurrent.CompletableFuture<?> all =
-+            java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0]))
-+                .orTimeout(com.azurebranches.command.ExpChainSupport.remoteTimeoutMs(), java.util.concurrent.TimeUnit.MILLISECONDS);
-+        all.whenComplete((v, ex) -> io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
-+            level, st.head.getX() >> 4, st.head.getZ() >> 4, () -> {
-+                com.azurebranches.command.ExpChainSupport.onResume();
-+                if (ex != null) {
-+                    com.azurebranches.command.ExpChainSupport.onTimeout("<command block chain>");
++
++        final java.util.List<java.util.concurrent.CompletableFuture<Void>> regionFutures =
++            new java.util.ArrayList<>(batchRegistry.size());
++
++        for (final java.util.Map.Entry<Long,
++             java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>> e
++             : batchRegistry.entrySet()) {
++
++            final int targetCx = (int) (e.getKey() >> 32);
++            final int targetCz = (int) (e.getKey() & 0xFFFF_FFFFL);
++
++            final java.util.concurrent.CompletableFuture<Void> regionDone =
++                new java.util.concurrent.CompletableFuture<>();
++
++            final java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry> entries =
++                java.util.List.copyOf(e.getValue());
++
++            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                .queueOrExecuteTickTask(level, targetCx, targetCz, () -> {
++                    for (final com.azurebranches.command.ExpChainSupport.DeferredEntry entry : entries) {
++                        try {
++                            entry.remoteTask.run();
++                            entry.resultFuture.complete(Boolean.TRUE);
++                        } catch (final Exception ex) {
++                            entry.resultFuture.completeExceptionally(ex);
++                        }
++                    }
++                    regionDone.complete(null);
++                });
++
++            regionFutures.add(regionDone);
++        }
++
++        final com.azurebranches.command.Continuation cont = head.createContinuation(
++            lastRunPos.asLong(), currentDirection.get3DDataValue(), remaining, batchStepCount);
++
++        java.util.concurrent.CompletableFuture.allOf(
++            regionFutures.toArray(new java.util.concurrent.CompletableFuture[0]))
++            .orTimeout(com.azurebranches.command.ExpChainSupport.remoteTimeoutMs(),
++                java.util.concurrent.TimeUnit.MILLISECONDS)
++            .whenComplete((v, ex) -> {
++                if (!head.isCurrent(cont)) {
++                    com.azurebranches.command.ExpChainSupport.onSupersede();
++                    return;
 +                }
-+                java.util.List<Boolean> results = new java.util.ArrayList<>(futures.size());
-+                for (java.util.concurrent.CompletableFuture<Boolean> f : futures) {
-+                    results.add(f.isDone() && !f.isCompletedExceptionally() ? f.getNow(Boolean.FALSE) : Boolean.FALSE);
-+                }
-+                int agg = com.azurebranches.command.ExpChainSupport.aggregate(results);
-+                // Real-time: re-read the block that ran; it may have been removed while suspended.
-+                if (level.getBlockEntity(runPos) instanceof CommandBlockEntity ranBlock) {
-+                    ranBlock.getCommandBlock().setSuccessCount(agg);
-+                    level.updateNeighbourForOutputSignal(runPos, level.getBlockState(runPos).getBlock());
-+                }
-+                stepChainExp(st); // resume: continue the loop from the next block
-+            }));
++                io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                    .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
++                        if (!head.isCurrent(cont)) {
++                            com.azurebranches.command.ExpChainSupport.onSupersede();
++                            return;
++                        }
++                        com.azurebranches.command.ExpChainSupport.onResume();
++                        if (ex != null) {
++                            com.azurebranches.command.ExpChainSupport.onTimeout("<command block chain>");
++                        }
++                        head.removeContinuation(cont);
++                        aggregateAndResume(head, level, headBlock, cont, firstBatchPos, batchRegistry);
++                    });
++            });
 +    }
-+    // AzureBranches end - EXP suspendable chain implementation
++
++    private static void aggregateAndResume(
++        final com.azurebranches.command.ChainHead head,
++        final ServerLevel level, final BlockPos headBlock,
++        final com.azurebranches.command.Continuation cont,
++        final BlockPos firstBatchPos,
++        final java.util.LinkedHashMap<Long,
++            java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>> batchRegistry) {
++
++        final java.util.List<Boolean> results = new java.util.ArrayList<>();
++        for (final java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry> entries
++             : batchRegistry.values()) {
++            for (final com.azurebranches.command.ExpChainSupport.DeferredEntry entry : entries) {
++                final java.util.concurrent.CompletableFuture<Boolean> f = entry.resultFuture;
++                results.add(f.isDone() && !f.isCompletedExceptionally()
++                    ? f.getNow(Boolean.FALSE) : Boolean.FALSE);
++            }
++        }
++        final int agg = com.azurebranches.command.ExpChainSupport.aggregate(results);
++
++        if (level.getBlockEntity(firstBatchPos) instanceof final CommandBlockEntity ranBlock) {
++            ranBlock.getCommandBlock().setSuccessCount(agg);
++            level.updateNeighbourForOutputSignal(firstBatchPos,
++                level.getBlockState(firstBatchPos).getBlock());
++        }
++
++        final BlockPos.MutableBlockPos resumePos = BlockPos.of(cont.cursorPos).mutable();
++        final Direction resumeDir = Direction.from3DDataValue(cont.direction3d);
++        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining);
++    }
++    // AzureBranches end - EXP suspendable chain implementation (v2)
  }
