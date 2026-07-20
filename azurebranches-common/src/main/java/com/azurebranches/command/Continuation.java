@@ -58,6 +58,19 @@ public final class Continuation {
      */
     public volatile long[] pendingWritePositions;
 
+    /**
+     * EXP3: Block positions (BlockPos.asLong) that were read during the Phase
+     * that created this Continuation. Used by PhaseValidator at Phase resume
+     * to detect external modifications (OCC read-set validation).
+     *
+     * <p>Null or empty when the dispatching Phase performed no cross-region
+     * reads, or when EXP3 validation is disabled.</p>
+     */
+    public volatile long[] readSetPositions;
+
+    /** EXP3: Retry count for this Continuation's Phase (0 = first attempt). */
+    public volatile int retryCount;
+
     Continuation(final long traversalId, final long cursorPos, final int direction3d,
                  final int remaining, final int stepCount) {
         this.traversalId = traversalId;

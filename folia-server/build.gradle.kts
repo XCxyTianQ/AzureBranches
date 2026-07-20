@@ -136,6 +136,97 @@ tasks.register("buildFolia") {
             }
         }
 
+        // AzureBranches EXP3: apply post-patch source transformations
+        // (These modify already-patched Minecraft sources without requiring
+        //  additional paperweight patch files, avoiding 3-way merge issues.)
+        run {
+            val cmdBlockFile = File(foliaDir,
+                "folia-server/src/minecraft/java/net/minecraft/world/level/block/CommandBlock.java")
+            val setBlockFile = File(foliaDir,
+                "folia-server/src/minecraft/java/net/minecraft/server/commands/SetBlockCommand.java")
+
+            if (cmdBlockFile.exists()) {
+                var content = cmdBlockFile.readText()
+
+                // 1) Deterministic seed for Phase retry
+                content = content.replace(
+                    "final long traversalId = head.startTraversal();",
+                    "final long traversalId = head.startTraversal(level.getSeed()); // EXP3 deterministic seed"
+                )
+
+                // 2) Savepoint before conditional boundaries
+                content = content.replace(
+                    "if (commandBlock.isConditional() && !commandBlock.markConditionMet()) {",
+                    "// EXP3: savepoint for partial rollback\n" +
+                    "            if (commandBlock.isConditional()\n" +
+                    "                && com.azurebranches.command.PhaseValidator.isEnabled()) {\n" +
+                    "                phaseSnap.createSavepoint(pos.asLong(), direction.get3DDataValue());\n" +
+                    "            }\n" +
+                    "            if (commandBlock.isConditional() && !commandBlock.markConditionMet()) {"
+                )
+
+                // 3) Capture readSetPositions
+                content = content.replace(
+                    "final long[] pendingWrites = currentPhaseSnap != null\n" +
+                    "            ? currentPhaseSnap.getPendingWritePositions() : null;",
+                    "final long[] pendingWrites = currentPhaseSnap != null\n" +
+                    "            ? currentPhaseSnap.getPendingWritePositions() : null;\n" +
+                    "        final long[] readSetPos = currentPhaseSnap != null\n" +
+                    "            ? currentPhaseSnap.getReadSetPositions() : null;"
+                )
+
+                // 4) Attach readSetPositions to Continuation
+                content = content.replace(
+                    "cont = head.createContinuation(lastRunPos.asLong(), currentDirection.get3DDataValue(),\n" +
+                    "                remaining, batchStepCount);\n" +
+                    "        }\n" +
+                    "        // AzureBranches end - Phase-Based snapshot",
+                    "cont = head.createContinuation(lastRunPos.asLong(), currentDirection.get3DDataValue(),\n" +
+                    "                remaining, batchStepCount);\n" +
+                    "        }\n" +
+                    "        cont.readSetPositions = readSetPos; // EXP3\n" +
+                    "        // AzureBranches end - Phase-Based snapshot"
+                )
+
+                // 5) OCC validation in aggregateAndResume
+                content = content.replace(
+                    "final com.azurebranches.command.PhaseSnapshot nextPhaseSnap =\n" +
+                    "            com.azurebranches.command.PhaseSnapshot.fromContinuation(cont, level.getGameTime());\n" +
+                    "        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, nextPhaseSnap);",
+                    "final com.azurebranches.command.PhaseSnapshot nextPhaseSnap =\n" +
+                    "            com.azurebranches.command.PhaseSnapshot.fromContinuation(cont, level.getGameTime());\n" +
+                    "        // EXP3: OCC validation\n" +
+                    "        if (com.azurebranches.command.PhaseValidator.isEnabled()) {\n" +
+                    "            final com.azurebranches.command.PhaseValidator.ValidationResult result =\n" +
+                    "                com.azurebranches.command.PhaseValidator.validate(\n" +
+                    "                    nextPhaseSnap, cont.retryCount, java.util.Map.of());\n" +
+                    "            switch (result) {\n" +
+                    "                case COMMIT -> com.azurebranches.command.ExpChainSupport.onValidationPassed();\n" +
+                    "                case RETRY -> { com.azurebranches.command.ExpChainSupport.onValidationRetry(); cont.retryCount++; }\n" +
+                    "                case RETRY_EXHAUSTED -> com.azurebranches.command.ExpChainSupport.onValidationExhausted();\n" +
+                    "                case READ_SET_OVERFLOW -> {}\n" +
+                    "            }\n" +
+                    "        }\n" +
+                    "        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, nextPhaseSnap);"
+                )
+
+                cmdBlockFile.writeText(content)
+                println("  Applied EXP3 transformations to CommandBlock.java")
+            }
+
+            if (setBlockFile.exists()) {
+                var content = setBlockFile.readText()
+                // 6) Capture old block state for rollback
+                content = content.replace(
+                    "phaseSnap.putBlock(pos.asLong(), expectedState);",
+                    "final BlockState oldState = level.getBlockState(pos); // EXP3 rollback\n" +
+                    "                phaseSnap.putBlock(pos.asLong(), expectedState, oldState);"
+                )
+                setBlockFile.writeText(content)
+                println("  Applied EXP3 transformation to SetBlockCommand.java")
+            }
+        }
+
         // Step 2: create runnable paperclip jar (compiles server + our hooks)
         println("=== Folia step 2/2: createPaperclipJar ===")
         // AzureBranches: patch brand & version identity before building paperclip
@@ -151,7 +242,7 @@ tasks.register("buildFolia") {
         // Build metadata env vars for proper version & timestamp
         val now = Instant.now()
         val buildEnv = mapOf(
-            "BUILD_NUMBER" to "EXP2_PB",
+            "BUILD_NUMBER" to "0004",
             "BUILD_STARTED_AT" to now.toString()
         )
 
@@ -187,7 +278,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP2_PB.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP3.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

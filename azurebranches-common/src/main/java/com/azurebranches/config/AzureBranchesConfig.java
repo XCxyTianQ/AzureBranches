@@ -31,6 +31,9 @@ public final class AzureBranchesConfig {
     private String expSuccessCountMode;
     private int expBatchMaxSize;
     private boolean expPhaseSnapshotEnabled;
+    private boolean expValidationEnabled;
+    private int expValidationMaxRetries;
+    private int expValidationMaxReadSet;
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
@@ -167,6 +170,9 @@ public final class AzureBranchesConfig {
         expSuccessCountMode=getString("command_blocks.exp.success_count_mode","SUM");
         expBatchMaxSize=getInt("command_blocks.exp.batch_max_size",15);
         expPhaseSnapshotEnabled=getBool("command_blocks.exp.phase_snapshot.enabled",true);
+        expValidationEnabled=getBool("command_blocks.exp.validation.enabled",true);
+        expValidationMaxRetries=getInt("command_blocks.exp.validation.max_retries",3);
+        expValidationMaxReadSet=getInt("command_blocks.exp.validation.max_read_set",256);
         entityLimitTypes.clear();
         for (Map.Entry<String,Object> e : values.entrySet()) {
             if (e.getKey().startsWith("entity_limits.types.") && e.getValue() instanceof Map) {
@@ -196,6 +202,9 @@ public final class AzureBranchesConfig {
         setDefault("command_blocks.exp.success_count_mode","SUM");
         setDefault("command_blocks.exp.batch_max_size",15);
         setDefault("command_blocks.exp.phase_snapshot.enabled",true);
+        setDefault("command_blocks.exp.validation.enabled",true);
+        setDefault("command_blocks.exp.validation.max_retries",3L);
+        setDefault("command_blocks.exp.validation.max_read_set",256L);
     }
 
     private void setDefault(String key, Object value) { if(!values.containsKey(key))values.put(key,value); }
@@ -216,4 +225,7 @@ public final class AzureBranchesConfig {
     public String expSuccessCountMode() { return expSuccessCountMode; }
     public int expBatchMaxSize() { return expBatchMaxSize; }
     public boolean expPhaseSnapshotEnabled() { return expPhaseSnapshotEnabled; }
+    public boolean expValidationEnabled() { return expValidationEnabled; }
+    public int expValidationMaxRetries() { return expValidationMaxRetries; }
+    public int expValidationMaxReadSet() { return expValidationMaxReadSet; }
 }

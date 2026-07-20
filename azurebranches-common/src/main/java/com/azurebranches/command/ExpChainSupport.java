@@ -331,9 +331,23 @@ public final class ExpChainSupport {
     private static final AtomicLong phasePreFetches = new AtomicLong();
     private static final AtomicLong phaseCacheHits = new AtomicLong();
 
+    // EXP3: OCC validation statistics
+    private static final AtomicLong validationPassed = new AtomicLong();
+    private static final AtomicLong validationRetried = new AtomicLong();
+    private static final AtomicLong validationExhausted = new AtomicLong();
+
     public static void onSuspend() { suspended.incrementAndGet(); }
     public static void onResume() { resumed.incrementAndGet(); }
     public static void onSupersede() { superseded.incrementAndGet(); }
+
+    /** EXP3: Record successful Phase validation. */
+    public static void onValidationPassed() { validationPassed.incrementAndGet(); }
+
+    /** EXP3: Record Phase retry due to read-set conflict. */
+    public static void onValidationRetry() { validationRetried.incrementAndGet(); }
+
+    /** EXP3: Record Phase retry exhaustion. */
+    public static void onValidationExhausted() { validationExhausted.incrementAndGet(); }
 
     public static void onTimeout(final String command) {
         final long n = timeouts.incrementAndGet();
@@ -356,6 +370,59 @@ public final class ExpChainSupport {
     public static long supersededCount() { return superseded.get(); }
     public static long preFetchCount() { return phasePreFetches.get(); }
     public static long cacheHitCount() { return phaseCacheHits.get(); }
+
+    /** EXP3: Number of Phases that passed validation. */
+    public static long validationPassedCount() { return validationPassed.get(); }
+    /** EXP3: Number of Phases retried due to conflict. */
+    public static long validationRetryCount() { return validationRetried.get(); }
+    /** EXP3: Number of Phases where retries were exhausted. */
+    public static long validationExhaustedCount() { return validationExhausted.get(); }
+    /** EXP3: Conflict ratio (retries / total validations). */
+    public static double validationConflictRatio() {
+        final long total = validationPassed.get() + validationRetried.get();
+        return total > 0 ? (double) validationRetried.get() / total : 0.0;
+    }
+
+    // ================================================================
+    //  EXP3: Isolation Level
+    // ================================================================
+
+    /**
+     * ANSI SQL-aligned isolation level provided by the EXP chain system.
+     *
+     * <p>EXP3 provides <b>Snapshot Isolation</b> as defined by Berenson et al.
+     * (1995, "A Critique of ANSI SQL Isolation Levels"):</p>
+     * <ul>
+     *   <li>No Dirty Reads — own writes visible via PhaseSnapshot cache</li>
+     *   <li>No Non-Repeatable Reads — readSet validation detects external writes</li>
+     *   <li>No Lost Updates — traversal supersede resolves write-write conflicts</li>
+     * </ul>
+     *
+     * <p>Non-guarantees (by design):</p>
+     * <ul>
+     *   <li>Phantom Reads — entity selectors may vary between Phases</li>
+     *   <li>Write Skew — concurrent chains reading overlapping data may
+     *       produce logically inconsistent states</li>
+     * </ul>
+     */
+    public enum IsolationLevel {
+        /** Snapshot isolation (EXP3 enabled). */
+        SNAPSHOT,
+        /** Read committed with write-through cache (EXP2_PB, EXP3 disabled). */
+        READ_COMMITTED
+    }
+
+    /**
+     * Get the current isolation level based on config.
+     */
+    public static IsolationLevel isolationLevel() {
+        try {
+            return AzureBranchesConfig.get().expValidationEnabled()
+                ? IsolationLevel.SNAPSHOT : IsolationLevel.READ_COMMITTED;
+        } catch (final IllegalStateException e) {
+            return IsolationLevel.READ_COMMITTED;
+        }
+    }
 
     private ExpChainSupport() {}
 }

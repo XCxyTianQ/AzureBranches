@@ -68,6 +68,13 @@ public final class ChainHead {
     /** True while the walker is iterating command blocks on the home thread. */
     volatile boolean walking;
 
+    /**
+     * EXP3: Deterministic random seed for the current traversal.
+     * Derived from (traversalId, worldSeed). Ensures that retried Phases
+     * produce identical random results.
+     */
+    volatile long traversalRandomSeed;
+
     /** Estimated average remote latency in ticks; used for MAX_PENDING heuristics. */
     volatile int avgSuspendTicks = 1;
 
@@ -92,19 +99,27 @@ public final class ChainHead {
      * Start a new traversal. Supersedes all pending continuations from any
      * previous traversal.
      *
+     * @param worldSeed the world's random seed (for deterministic replay)
      * @return the new traversalId, or -1L if the walking lock is held
      */
-    public long startTraversal() {
+    public long startTraversal(final long worldSeed) {
         if (walking) {
             return -1L;
         }
         walking = true;
         final long id = nextTraversalId.incrementAndGet();
         currentTraversalId = id;
+        // EXP3: deterministic random seed for retry consistency
+        this.traversalRandomSeed = deterministicHash(id, worldSeed);
         for (final Continuation c : pendingContinuations) {
             c.superseded.set(true);
         }
         return id;
+    }
+
+    /** Backward-compatible startTraversal (without deterministic seed). */
+    public long startTraversal() {
+        return startTraversal(0L);
     }
 
     /** Release the walking lock. Safe to call even after the chain suspended. */
@@ -166,6 +181,21 @@ public final class ChainHead {
 
     public long currentTraversalId() { return currentTraversalId; }
     public int pendingCount() { return pendingContinuations.size(); }
+
+    // ---- EXP3: deterministic seed ----
+
+    /**
+     * Generate a deterministic hash from traversalId and world seed.
+     * Ensures that retried Phases see the same random results.
+     */
+    private static long deterministicHash(final long traversalId, final long worldSeed) {
+        long h = traversalId * 0x9E3779B97F4A7C15L;
+        h ^= Long.rotateRight(worldSeed, 17);
+        h ^= h >>> 33;
+        h *= 0xC6A4A7935BD1E995L;
+        h ^= h >>> 29;
+        return h;
+    }
 
     // ---- global maintenance ----
 
