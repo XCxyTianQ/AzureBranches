@@ -151,7 +151,7 @@ tasks.register("buildFolia") {
         // Build metadata env vars for proper version & timestamp
         val now = Instant.now()
         val buildEnv = mapOf(
-            "BUILD_NUMBER" to "0003",
+            "BUILD_NUMBER" to "EXP2_PB",
             "BUILD_STARTED_AT" to now.toString()
         )
 
@@ -187,7 +187,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP2_PB.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

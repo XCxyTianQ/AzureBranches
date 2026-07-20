@@ -137,6 +137,18 @@ public final class ChainHead {
         return c;
     }
 
+    /**
+     * Create a continuation that also carries pending write positions from the
+     * current PhaseSnapshot, enabling Phase-Based cross-Phase read consistency.
+     */
+    public Continuation createContinuation(final long cursorPos, final int direction3d,
+                                           final int remaining, final int stepCount,
+                                           final long[] pendingWritePositions) {
+        final Continuation c = createContinuation(cursorPos, direction3d, remaining, stepCount);
+        c.pendingWritePositions = pendingWritePositions;
+        return c;
+    }
+
     /** Remove a continuation from the pending set (called on resume). */
     public void removeContinuation(final Continuation c) {
         pendingContinuations.remove(c);

@@ -105,11 +105,44 @@ public final class ExpChainSupport {
 
     private static final ThreadLocal<List<CompletableFuture<Boolean>>> PENDING_FUTURES = new ThreadLocal<>();
     private static final ThreadLocal<Map<Long, List<DeferredEntry>>> PENDING_DEFERRED = new ThreadLocal<>();
+    private static final ThreadLocal<PhaseSnapshot> PHASE_SNAPSHOT = new ThreadLocal<>();
 
-    /** Open a collection scope before dispatching a command block command (EXP only). */
+    /**
+     * Open a collection scope before dispatching a command block command (EXP only).
+     * Backward-compatible: does not create a PhaseSnapshot.
+     */
     public static void openContext() {
         PENDING_FUTURES.set(new ArrayList<>(4));
         PENDING_DEFERRED.set(new HashMap<>(2));
+    }
+
+    /**
+     * Open a collection scope with a PhaseSnapshot for Phase-Based consistency.
+     * Commands executed within this scope can read/write block states through
+     * the snapshot, ensuring same-Phase read-after-write consistency.
+     *
+     * @param phaseSnapshot the snapshot for the current Walking Phase (non-null)
+     */
+    public static void openContext(final PhaseSnapshot phaseSnapshot) {
+        PENDING_FUTURES.set(new ArrayList<>(4));
+        PENDING_DEFERRED.set(new HashMap<>(2));
+        PHASE_SNAPSHOT.set(phaseSnapshot);
+    }
+
+    /**
+     * Get the PhaseSnapshot for the current Walking Phase, or null if Phase-Based
+     * consistency is not active.
+     */
+    public static PhaseSnapshot getPhaseSnapshot() {
+        return PHASE_SNAPSHOT.get();
+    }
+
+    /**
+     * Clear the PhaseSnapshot from the current thread. Must be called at the
+     * end of each Walking Phase (before dispatchAndSuspend or endTraversal).
+     */
+    public static void clearPhaseSnapshot() {
+        PHASE_SNAPSHOT.remove();
     }
 
     /**
@@ -177,6 +210,8 @@ public final class ExpChainSupport {
         PENDING_FUTURES.remove();
         final Map<Long, List<DeferredEntry>> deferred = PENDING_DEFERRED.get();
         PENDING_DEFERRED.remove();
+        // Note: PhaseSnapshot is NOT cleared here — it persists across commands
+        // within the same Walking Phase. Use clearPhaseSnapshot() at Phase boundary.
         return new DeferredContext(
             futures != null ? futures : List.of(),
             deferred != null ? deferred : Map.of()
@@ -186,6 +221,37 @@ public final class ExpChainSupport {
     /** True when an EXP execution context is currently active. */
     public static boolean isContextActive() {
         return PENDING_FUTURES.get() != null;
+    }
+
+    /**
+     * Register a cross-region block state read for deferred batch pre-fetch.
+     * Used at Phase start to validate pending write positions from the previous
+     * Phase. The readTask receives a CompletableFuture that it should complete
+     * with the read result (Boolean.TRUE = success / expected state found).
+     *
+     * @param targetCx target region chunk X
+     * @param targetCz target region chunk Z
+     * @param readTask the read operation to execute on the target region thread
+     * @return a CompletableFuture, or null when no EXP context is active
+     */
+    public static CompletableFuture<Boolean> registerDeferredRead(
+        final int targetCx, final int targetCz,
+        final java.util.function.Consumer<CompletableFuture<Boolean>> readTask
+    ) {
+        final List<CompletableFuture<Boolean>> futures = PENDING_FUTURES.get();
+        if (futures == null) {
+            return null;
+        }
+        final CompletableFuture<Boolean> future = new CompletableFuture<>();
+        futures.add(future);
+        final Map<Long, List<DeferredEntry>> deferred = PENDING_DEFERRED.get();
+        if (deferred != null) {
+            final long key = DeferredContext.regionKey(targetCx, targetCz);
+            deferred.computeIfAbsent(key, k -> new ArrayList<>())
+                .add(new DeferredEntry(targetCx, targetCz,
+                    () -> readTask.accept(future), future));
+        }
+        return future;
     }
 
     // ================================================================
@@ -262,6 +328,8 @@ public final class ExpChainSupport {
     private static final AtomicLong resumed = new AtomicLong();
     private static final AtomicLong timeouts = new AtomicLong();
     private static final AtomicLong superseded = new AtomicLong();
+    private static final AtomicLong phasePreFetches = new AtomicLong();
+    private static final AtomicLong phaseCacheHits = new AtomicLong();
 
     public static void onSuspend() { suspended.incrementAndGet(); }
     public static void onResume() { resumed.incrementAndGet(); }
@@ -276,10 +344,18 @@ public final class ExpChainSupport {
         }
     }
 
+    /** Record a Phase pre-fetch operation (used for metrics). */
+    public static void onPreFetch() { phasePreFetches.incrementAndGet(); }
+
+    /** Record a PhaseSnapshot cache hit (used for metrics). */
+    public static void onCacheHit() { phaseCacheHits.incrementAndGet(); }
+
     public static long suspendedCount() { return suspended.get(); }
     public static long resumedCount() { return resumed.get(); }
     public static long timeoutCount() { return timeouts.get(); }
     public static long supersededCount() { return superseded.get(); }
+    public static long preFetchCount() { return phasePreFetches.get(); }
+    public static long cacheHitCount() { return phaseCacheHits.get(); }
 
     private ExpChainSupport() {}
 }

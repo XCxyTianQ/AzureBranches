@@ -48,6 +48,16 @@ public final class Continuation {
     /** Set to true by ChainHead when a newer traversal supersedes this continuation. */
     public final AtomicBoolean superseded = new AtomicBoolean(false);
 
+    /**
+     * Block positions (BlockPos.asLong) with pending cross-region writes from the
+     * Phase that created this Continuation. The next Phase uses these positions for
+     * pre-fetch validation and cache warm-up.
+     *
+     * <p>Null or empty when the dispatching Phase had no cross-region writes,
+     * or when Phase-Based snapshot is disabled.</p>
+     */
+    public volatile long[] pendingWritePositions;
+
     Continuation(final long traversalId, final long cursorPos, final int direction3d,
                  final int remaining, final int stepCount) {
         this.traversalId = traversalId;

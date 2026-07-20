@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AzureBranches <azurebranches@local>
+Date: Sun, 20 Jul 2026 13:50:00 +0800
+Subject: [PATCH] AzureBranches - Phase-Based snapshot integration for EXP
+ chain walker
+
+Integrates PhaseSnapshot into the EXP chain walker for Phase-Based
+read-after-write consistency within and across Walking phases.
+
+---
+ net/minecraft/world/level/block/CommandBlock.java | 89 +++++++++++++++-------
+ 1 file changed, 64 insertions(+), 25 deletions(-)
+
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index 9a9337a..b7918a4 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -243,8 +243,12 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             return;
+         }
+         try {
++            // AzureBranches start - Phase-Based snapshot
++            final com.azurebranches.command.PhaseSnapshot phaseSnap =
++                new com.azurebranches.command.PhaseSnapshot(level.getGameTime());
+             walkExpChain(head, level, headPosBlock.immutable(), headPosBlock.mutable(), direction,
+-                level.getGameRules().get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH));
++                level.getGameRules().get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH), phaseSnap);
++            // AzureBranches end - Phase-Based snapshot
+         } finally {
+             head.endWalking();
+         }
+@@ -253,7 +257,8 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+     private static void walkExpChain(final com.azurebranches.command.ChainHead head,
+                                      final ServerLevel level, final BlockPos headBlock,
+                                      final BlockPos.MutableBlockPos pos, Direction direction,
+-                                     final int remaining) {
++                                     final int remaining,
++                                     final com.azurebranches.command.PhaseSnapshot phaseSnap) {
+         final java.util.LinkedHashMap<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>
+             batchRegistry = new java.util.LinkedHashMap<>();
+         int batchStepCount = 0;
+@@ -279,7 +284,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             if (commandBlock.isPowered() || commandBlock.isAutomatic()) {
+                 final BaseCommandBlock baseCommandBlock = commandBlock.getCommandBlock();
+ 
+-                com.azurebranches.command.ExpChainSupport.openContext();
++                com.azurebranches.command.ExpChainSupport.openContext(phaseSnap);
+                 final boolean shouldContinue;
+                 final com.azurebranches.command.ExpChainSupport.DeferredContext ctx;
+                 try {
+@@ -339,6 +344,8 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             dispatchAndSuspend(head, level, headBlock, firstBatchPos, lastRunPos, direction,
+                 walkRemaining, batchRegistry, batchStepCount);
+         } else {
++            // Phase-Based: clear snapshot at chain end
++            com.azurebranches.command.ExpChainSupport.clearPhaseSnapshot();
+             head.endTraversal();
+         }
+     }
+@@ -386,8 +393,21 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             regionFutures.add(regionDone);
+         }
+ 
+-        final com.azurebranches.command.Continuation cont = head.createContinuation(
+-            lastRunPos.asLong(), currentDirection.get3DDataValue(), remaining, batchStepCount);
++        // AzureBranches start - Phase-Based: capture pending write positions
++        final com.azurebranches.command.PhaseSnapshot currentPhaseSnap =
++            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++        final long[] pendingWrites = currentPhaseSnap != null
++            ? currentPhaseSnap.getPendingWritePositions() : null;
++
++        final com.azurebranches.command.Continuation cont;
++        if (pendingWrites != null && pendingWrites.length > 0) {
++            cont = head.createContinuation(lastRunPos.asLong(), currentDirection.get3DDataValue(),
++                remaining, batchStepCount, pendingWrites);
++        } else {
++            cont = head.createContinuation(lastRunPos.asLong(), currentDirection.get3DDataValue(),
++                remaining, batchStepCount);
++        }
++        // AzureBranches end - Phase-Based snapshot
+ 
+         java.util.concurrent.CompletableFuture.allOf(
+             regionFutures.toArray(new java.util.concurrent.CompletableFuture[0]))
+@@ -412,6 +432,8 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                         aggregateAndResume(head, level, headBlock, cont, firstBatchPos, batchRegistry);
+                     });
+             });
++        // Phase-Based: clear snapshot at Phase boundary
++        com.azurebranches.command.ExpChainSupport.clearPhaseSnapshot();
+     }
+ 
+     private static void aggregateAndResume(
+@@ -441,7 +463,11 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+ 
+         final BlockPos.MutableBlockPos resumePos = BlockPos.of(cont.cursorPos).mutable();
+         final Direction resumeDir = Direction.from3DDataValue(cont.direction3d);
+-        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining);
++        // AzureBranches start - Phase-Based: create new PhaseSnapshot for resumed Phase
++        final com.azurebranches.command.PhaseSnapshot nextPhaseSnap =
++            com.azurebranches.command.PhaseSnapshot.fromContinuation(cont, level.getGameTime());
++        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, nextPhaseSnap);
++        // AzureBranches end - Phase-Based snapshot
+     }
+     // AzureBranches end - EXP suspendable chain implementation (v2)
+ }

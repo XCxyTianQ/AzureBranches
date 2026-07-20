@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AzureBranches <azurebranches@local>
+Date: Sun, 20 Jul 2026 14:00:00 +0800
+Subject: [PATCH] AzureBranches - Phase-Based write-through for
+ SetBlockCommand
+
+Adds PhaseSnapshot write-through to the EXP deferred dispatch path.
+After registerDeferred, the expected block state is cached and
+cross-region positions are marked as pending for next-Phase pre-fetch.
+
+---
+ net/minecraft/server/commands/SetBlockCommand.java | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/net/minecraft/server/commands/SetBlockCommand.java b/net/minecraft/server/commands/SetBlockCommand.java
+index a362437..529c1ff 100644
+--- a/net/minecraft/server/commands/SetBlockCommand.java
++++ b/net/minecraft/server/commands/SetBlockCommand.java
+@@ -163,6 +163,21 @@ public class SetBlockCommand {
+                     throw new RuntimeException(ex);
+                 }
+             });
++
++            // AzureBranches - Phase-Based: write-through to PhaseSnapshot
++            final com.azurebranches.command.PhaseSnapshot phaseSnap =
++                com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++            if (phaseSnap != null) {
++                // Cache the expected block state so same-Phase reads see this write.
++                // For same-region, the write already executed synchronously;
++                // for cross-region, this marks the position for next-Phase pre-fetch.
++                final BlockState expectedState = block.getState();
++                phaseSnap.putBlock(pos.asLong(), expectedState);
++                if (!sameRegion) {
++                    phaseSnap.markPendingWrite(pos.asLong());
++                }
++            }
++
+             // Real result is in the future, aggregated by the Walker after batch dispatch.
+             // Return 1 consistently (matching Folia's fire-and-forget placeholder).
+             return 1;

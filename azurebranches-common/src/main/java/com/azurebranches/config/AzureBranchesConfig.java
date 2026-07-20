@@ -30,6 +30,7 @@ public final class AzureBranchesConfig {
     private long expRemoteTimeoutMs;
     private String expSuccessCountMode;
     private int expBatchMaxSize;
+    private boolean expPhaseSnapshotEnabled;
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
@@ -165,6 +166,7 @@ public final class AzureBranchesConfig {
         expRemoteTimeoutMs=getLong("command_blocks.exp.remote_timeout_ms",1000L);
         expSuccessCountMode=getString("command_blocks.exp.success_count_mode","SUM");
         expBatchMaxSize=getInt("command_blocks.exp.batch_max_size",15);
+        expPhaseSnapshotEnabled=getBool("command_blocks.exp.phase_snapshot.enabled",true);
         entityLimitTypes.clear();
         for (Map.Entry<String,Object> e : values.entrySet()) {
             if (e.getKey().startsWith("entity_limits.types.") && e.getValue() instanceof Map) {
@@ -193,6 +195,7 @@ public final class AzureBranchesConfig {
         setDefault("command_blocks.exp.remote_timeout_ms",1000L);
         setDefault("command_blocks.exp.success_count_mode","SUM");
         setDefault("command_blocks.exp.batch_max_size",15);
+        setDefault("command_blocks.exp.phase_snapshot.enabled",true);
     }
 
     private void setDefault(String key, Object value) { if(!values.containsKey(key))values.put(key,value); }
@@ -212,4 +215,5 @@ public final class AzureBranchesConfig {
     public long expRemoteTimeoutMs() { return expRemoteTimeoutMs; }
     public String expSuccessCountMode() { return expSuccessCountMode; }
     public int expBatchMaxSize() { return expBatchMaxSize; }
+    public boolean expPhaseSnapshotEnabled() { return expPhaseSnapshotEnabled; }
 }
