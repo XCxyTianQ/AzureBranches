@@ -214,16 +214,39 @@ tasks.register("buildFolia") {
                 println("  Applied EXP3 transformations to CommandBlock.java")
             }
 
+            // EXP4: SetBlockCommand write-through now handled by data pool interception.
+            // The per-command adapter (putBlock + oldState) is no longer needed.
             if (setBlockFile.exists()) {
-                var content = setBlockFile.readText()
-                // 6) Capture old block state for rollback
-                content = content.replace(
-                    "phaseSnap.putBlock(pos.asLong(), expectedState);",
-                    "final BlockState oldState = level.getBlockState(pos); // EXP3 rollback\n" +
-                    "                phaseSnap.putBlock(pos.asLong(), expectedState, oldState);"
+                println("  EXP4: SetBlockCommand relies on data pool interception (no per-command patch needed)")
+            }
+
+            // EXP4: intercept Level.getBlockState() for transparent PhaseSnapshot cache
+            val levelFile = File(foliaDir,
+                "folia-server/src/minecraft/java/net/minecraft/world/level/Level.java")
+            if (levelFile.exists()) {
+                var levelContent = levelFile.readText()
+                // Insert PhaseSnapshot cache check before chunk block state fetch
+                levelContent = levelContent.replace(
+                    "final BlockState result = this.getChunkForBlockState(pos);",
+                    "// AzureBranches EXP4: PhaseSnapshot cache interception\n" +
+                    "        final com.azurebranches.command.PhaseSnapshot _exp4snap =\n" +
+                    "            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();\n" +
+                    "        if (_exp4snap != null) {\n" +
+                    "            final Object _cached = _exp4snap.getCached(pos.asLong());\n" +
+                    "            if (_cached != null) {\n" +
+                    "                com.azurebranches.command.ExpChainSupport.onDataInterceptBlockRead();\n" +
+                    "                return (BlockState) _cached;\n" +
+                    "            }\n" +
+                    "        }\n" +
+                    "        final BlockState result = this.getChunkForBlockState(pos);\n" +
+                    "        // AzureBranches EXP4: record read for OCC validation\n" +
+                    "        if (_exp4snap != null) {\n" +
+                    "            _exp4snap.recordRead(pos.asLong(),\n" +
+                    "                ((net.minecraft.server.level.ServerLevel) this).getGameTime());\n" +
+                    "        }"
                 )
-                setBlockFile.writeText(content)
-                println("  Applied EXP3 transformation to SetBlockCommand.java")
+                levelFile.writeText(levelContent)
+                println("  EXP4: data pool interception applied to Level.java")
             }
         }
 
@@ -242,7 +265,7 @@ tasks.register("buildFolia") {
         // Build metadata env vars for proper version & timestamp
         val now = Instant.now()
         val buildEnv = mapOf(
-            "BUILD_NUMBER" to "0004",
+            "BUILD_NUMBER" to "0005",
             "BUILD_STARTED_AT" to now.toString()
         )
 
@@ -278,7 +301,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP3.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP4.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

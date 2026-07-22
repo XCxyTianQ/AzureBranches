@@ -62,6 +62,22 @@ public final class PhaseSnapshot {
     /** Positions with pending cross-region writes (propagated to Continuation). */
     private final Set<Long> pendingWritePositions;
 
+    // ================================================================
+    //  EXP4: Scoreboard layer
+    // ================================================================
+
+    /** Score cache: "objective:holder" → value. */
+    private final Map<String, Integer> scoreCache;
+
+    /** Pre-write score values for rollback (reverse-operation compensation). */
+    private final Map<String, Integer> oldScoreValues;
+
+    /** Score keys with pending cross-region writes. */
+    private final Set<String> pendingScoreKeys;
+
+    /** Score keys read during this Phase (OCC read-set for scores). */
+    private final Map<String, Long> scoreReadSet;
+
     /**
      * EXP3: Positions read during this Phase, with the tick at which they
      * were read. Used for OCC validation at Phase commit time.
@@ -103,6 +119,10 @@ public final class PhaseSnapshot {
         this.readSet = new HashMap<>();
         this.oldBlockStates = new HashMap<>();
         this.savepoints = new ArrayDeque<>();
+        this.scoreCache = new HashMap<>();
+        this.oldScoreValues = new HashMap<>();
+        this.pendingScoreKeys = new HashSet<>();
+        this.scoreReadSet = new HashMap<>();
         this.snapshotTick = tick;
     }
 
@@ -158,6 +178,78 @@ public final class PhaseSnapshot {
     public int readSetSize() {
         return readSet.size();
     }
+
+    // ================================================================
+    //  EXP4: Scoreboard read/write path
+    // ================================================================
+
+    /** Build a score key from objective name and holder name. */
+    public static String scoreKey(final String objective, final String holder) {
+        return objective + ":" + holder;
+    }
+
+    /** Try to retrieve a cached score value. */
+    public Integer getCachedScore(final String key) {
+        return scoreCache.get(key);
+    }
+
+    /**
+     * Store a score value in the cache with rollback support.
+     * For arithmetic operations (add/remove), the delta = newVal - oldVal
+     * is stored as the compensation operation rather than the raw value.
+     *
+     * @param key     "objective:holder"
+     * @param newVal  expected score after this Phase's operations
+     * @param oldVal  score before this Phase's operations (for rollback compensation)
+     */
+    public void putScore(final String key, final int newVal, final int oldVal) {
+        scoreCache.put(key, newVal);
+        if (!oldScoreValues.containsKey(key)) {
+            oldScoreValues.put(key, oldVal);
+        }
+    }
+
+    /** Mark a score key as having a pending cross-region write. */
+    public void markPendingScore(final String key) {
+        pendingScoreKeys.add(key);
+    }
+
+    /** Check if a score key has a pending write. */
+    public boolean hasPendingScore(final String key) {
+        return pendingScoreKeys.contains(key);
+    }
+
+    /**
+     * Record a score read for OCC validation.
+     * @param key  "objective:holder"
+     * @param tick current game tick at read time
+     */
+    public void recordScoreRead(final String key, final long tick) {
+        scoreReadSet.putIfAbsent(key, tick);
+    }
+
+    /** Get the score read-set for validation. */
+    public Map<String, Long> getScoreReadSet() {
+        return scoreReadSet;
+    }
+
+    /** Get old score values for rollback compensation. */
+    public Map<String, Integer> getOldScoreValues() {
+        return oldScoreValues;
+    }
+
+    /** Extract pending score keys for Continuation propagation. */
+    public String[] getPendingScoreKeys() {
+        return pendingScoreKeys.toArray(new String[0]);
+    }
+
+    /** Extract score read-set keys for Continuation propagation. */
+    public String[] getScoreReadSetKeys() {
+        return scoreReadSet.keySet().toArray(new String[0]);
+    }
+
+    public int scoreCacheSize() { return scoreCache.size(); }
+    public int scoreReadSetCount() { return scoreReadSet.size(); }
 
     // ================================================================
     //  Write path (with rollback support)

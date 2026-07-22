@@ -336,6 +336,10 @@ public final class ExpChainSupport {
     private static final AtomicLong validationRetried = new AtomicLong();
     private static final AtomicLong validationExhausted = new AtomicLong();
 
+    // EXP4: Data pool interception statistics
+    private static final AtomicLong dataInterceptBlockWrites = new AtomicLong();
+    private static final AtomicLong dataInterceptBlockReads = new AtomicLong();
+
     public static void onSuspend() { suspended.incrementAndGet(); }
     public static void onResume() { resumed.incrementAndGet(); }
     public static void onSupersede() { superseded.incrementAndGet(); }
@@ -348,6 +352,12 @@ public final class ExpChainSupport {
 
     /** EXP3: Record Phase retry exhaustion. */
     public static void onValidationExhausted() { validationExhausted.incrementAndGet(); }
+
+    /** EXP4: Record a block write intercepted at the data pool level. */
+    public static void onDataInterceptBlockWrite() { dataInterceptBlockWrites.incrementAndGet(); }
+
+    /** EXP4: Record a block read intercepted at the data pool level. */
+    public static void onDataInterceptBlockRead() { dataInterceptBlockReads.incrementAndGet(); }
 
     public static void onTimeout(final String command) {
         final long n = timeouts.incrementAndGet();
@@ -382,6 +392,12 @@ public final class ExpChainSupport {
         final long total = validationPassed.get() + validationRetried.get();
         return total > 0 ? (double) validationRetried.get() / total : 0.0;
     }
+
+    /** EXP4: Data pool block write interception count. */
+    public static long dataInterceptBlockWriteCount() { return dataInterceptBlockWrites.get(); }
+
+    /** EXP4: Data pool block read interception count. */
+    public static long dataInterceptBlockReadCount() { return dataInterceptBlockReads.get(); }
 
     // ================================================================
     //  EXP3: Isolation Level

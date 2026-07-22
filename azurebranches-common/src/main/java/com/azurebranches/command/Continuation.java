@@ -71,6 +71,19 @@ public final class Continuation {
     /** EXP3: Retry count for this Continuation's Phase (0 = first attempt). */
     public volatile int retryCount;
 
+    /**
+     * EXP4: Score keys ("objective:holder") with pending writes from the
+     * Phase that created this Continuation. Propagated for cross-Phase
+     * score consistency via ScoreLayer inverse-operation compensation.
+     */
+    public volatile String[] pendingScoreKeys;
+
+    /**
+     * EXP4: Score keys read during the Phase that created this Continuation.
+     * Propagated for OCC score read-set validation.
+     */
+    public volatile String[] readSetScoreKeys;
+
     Continuation(final long traversalId, final long cursorPos, final int direction3d,
                  final int remaining, final int stepCount) {
         this.traversalId = traversalId;
