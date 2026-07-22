@@ -35,6 +35,9 @@ public final class AzureBranchesConfig {
     private int expValidationMaxRetries;
     private int expValidationMaxReadSet;
     private boolean exp4DataInterceptEnabled;
+    private boolean exp4EntityLayerEnabled;
+    private boolean exp4DeferredActionsEnabled;
+    private int exp4DeferredMaxActions;
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
@@ -175,6 +178,9 @@ public final class AzureBranchesConfig {
         expValidationMaxRetries=getInt("command_blocks.exp.validation.max_retries",3);
         expValidationMaxReadSet=getInt("command_blocks.exp.validation.max_read_set",256);
         exp4DataInterceptEnabled=getBool("command_blocks.exp4.data_intercept.enabled",true);
+        exp4EntityLayerEnabled=getBool("command_blocks.exp4.entity_layer.enabled",true);
+        exp4DeferredActionsEnabled=getBool("command_blocks.exp4.deferred_actions.enabled",true);
+        exp4DeferredMaxActions=getInt("command_blocks.exp4.deferred_actions.max_per_phase",256);
         entityLimitTypes.clear();
         for (Map.Entry<String,Object> e : values.entrySet()) {
             if (e.getKey().startsWith("entity_limits.types.") && e.getValue() instanceof Map) {
@@ -208,6 +214,9 @@ public final class AzureBranchesConfig {
         setDefault("command_blocks.exp.validation.max_retries",3L);
         setDefault("command_blocks.exp.validation.max_read_set",256L);
         setDefault("command_blocks.exp4.data_intercept.enabled",true);
+        setDefault("command_blocks.exp4.entity_layer.enabled",true);
+        setDefault("command_blocks.exp4.deferred_actions.enabled",true);
+        setDefault("command_blocks.exp4.deferred_actions.max_per_phase",256L);
     }
 
     private void setDefault(String key, Object value) { if(!values.containsKey(key))values.put(key,value); }
@@ -232,4 +241,7 @@ public final class AzureBranchesConfig {
     public int expValidationMaxRetries() { return expValidationMaxRetries; }
     public int expValidationMaxReadSet() { return expValidationMaxReadSet; }
     public boolean exp4DataInterceptEnabled() { return exp4DataInterceptEnabled; }
+    public boolean exp4EntityLayerEnabled() { return exp4EntityLayerEnabled; }
+    public boolean exp4DeferredActionsEnabled() { return exp4DeferredActionsEnabled; }
+    public int exp4DeferredMaxActions() { return exp4DeferredMaxActions; }
 }

@@ -340,6 +340,23 @@ public final class ExpChainSupport {
     private static final AtomicLong dataInterceptBlockWrites = new AtomicLong();
     private static final AtomicLong dataInterceptBlockReads = new AtomicLong();
 
+    // EXP4: Scoreboard compensation statistics
+    private static final AtomicLong scoreCompensations = new AtomicLong();
+    private static final AtomicLong scoreCompensationFailures = new AtomicLong();
+
+    // EXP4: EntityLayer NBT interception statistics
+    private static final AtomicLong nbtCacheHits = new AtomicLong();
+    private static final AtomicLong nbtInterceptWrites = new AtomicLong();
+    private static final AtomicLong nbtCompensations = new AtomicLong();
+    private static final AtomicLong nbtCompensationFailures = new AtomicLong();
+
+    // EXP4: DeferredAction statistics
+    private static final AtomicLong deferredKills = new AtomicLong();
+    private static final AtomicLong deferredTps = new AtomicLong();
+    private static final AtomicLong deferredSummons = new AtomicLong();
+    private static final AtomicLong deferredCommits = new AtomicLong();
+    private static final AtomicLong deferredRollbacks = new AtomicLong();
+
     public static void onSuspend() { suspended.incrementAndGet(); }
     public static void onResume() { resumed.incrementAndGet(); }
     public static void onSupersede() { superseded.incrementAndGet(); }
@@ -398,6 +415,50 @@ public final class ExpChainSupport {
 
     /** EXP4: Data pool block read interception count. */
     public static long dataInterceptBlockReadCount() { return dataInterceptBlockReads.get(); }
+
+    /** EXP4: Record score compensation on Phase rollback. */
+    public static void onScoreCompensated(final int count) {
+        scoreCompensations.addAndGet(count);
+    }
+
+    /** EXP4: Record a failed score compensation attempt. */
+    public static void onScoreCompensationFailed() {
+        scoreCompensationFailures.incrementAndGet();
+    }
+
+    /** EXP4: Total score keys compensated across all Phase rollbacks. */
+    public static long scoreCompensationCount() { return scoreCompensations.get(); }
+
+    /** EXP4: Total failed score compensation attempts. */
+    public static long scoreCompensationFailureCount() { return scoreCompensationFailures.get(); }
+
+    /** EXP4: Compensation failure ratio (0.0 = perfect, 1.0 = all failed). */
+    public static double scoreCompensationFailureRatio() {
+        final long total = scoreCompensations.get() + scoreCompensationFailures.get();
+        return total > 0 ? (double) scoreCompensationFailures.get() / total : 0.0;
+    }
+
+    // EXP4: EntityLayer NBT metrics
+    public static void onNbtCacheHit() { nbtCacheHits.incrementAndGet(); }
+    public static void onNbtInterceptWrite() { nbtInterceptWrites.incrementAndGet(); }
+    public static void onNbtCompensated(final int count) { nbtCompensations.addAndGet(count); }
+    public static void onNbtCompensationFailed() { nbtCompensationFailures.incrementAndGet(); }
+    public static long nbtCacheHitCount() { return nbtCacheHits.get(); }
+    public static long nbtInterceptWriteCount() { return nbtInterceptWrites.get(); }
+    public static long nbtCompensationCount() { return nbtCompensations.get(); }
+    public static long nbtCompensationFailureCount() { return nbtCompensationFailures.get(); }
+
+    // EXP4: DeferredAction metrics
+    public static void onDeferredKill() { deferredKills.incrementAndGet(); }
+    public static void onDeferredTp() { deferredTps.incrementAndGet(); }
+    public static void onDeferredSummon() { deferredSummons.incrementAndGet(); }
+    public static void onDeferredCommit(final int count) { deferredCommits.addAndGet(count); }
+    public static void onDeferredRollback(final int count) { deferredRollbacks.addAndGet(count); }
+    public static long deferredKillCount() { return deferredKills.get(); }
+    public static long deferredTpCount() { return deferredTps.get(); }
+    public static long deferredSummonCount() { return deferredSummons.get(); }
+    public static long deferredCommitCount() { return deferredCommits.get(); }
+    public static long deferredRollbackCount() { return deferredRollbacks.get(); }
 
     // ================================================================
     //  EXP3: Isolation Level

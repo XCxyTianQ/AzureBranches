@@ -44,6 +44,7 @@
 package com.azurebranches.command;
 
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -77,6 +78,29 @@ public final class PhaseSnapshot {
 
     /** Score keys read during this Phase (OCC read-set for scores). */
     private final Map<String, Long> scoreReadSet;
+
+    // ================================================================
+    //  EXP4: Entity NBT layer (EntityLayer backing store)
+    // ================================================================
+
+    /** NBT write cache: composite-key → cached value. */
+    private final Map<String, Object> nbtCache;
+
+    /** Pre-write NBT values for rollback compensation. */
+    private final Map<String, Object> nbtOldValues;
+
+    /** NBT read-set for OCC validation: composite-key → tick. */
+    private final Map<String, Long> nbtReadSet;
+
+    // ================================================================
+    //  EXP4: DeferredAction queue (entity lifecycle WAL)
+    // ================================================================
+
+    /** Deferred entity lifecycle actions (kill/tp/summon), applied at commit. */
+    private final java.util.List<DeferredAction> deferredActions;
+
+    /** Virtual entity ID counter for deferred summons (starts from -1). */
+    private int nextVirtualId;
 
     /**
      * EXP3: Positions read during this Phase, with the tick at which they
@@ -123,6 +147,11 @@ public final class PhaseSnapshot {
         this.oldScoreValues = new HashMap<>();
         this.pendingScoreKeys = new HashSet<>();
         this.scoreReadSet = new HashMap<>();
+        this.nbtCache = new HashMap<>();
+        this.nbtOldValues = new HashMap<>();
+        this.nbtReadSet = new HashMap<>();
+        this.deferredActions = new java.util.ArrayList<>(8);
+        this.nextVirtualId = -1;
         this.snapshotTick = tick;
     }
 
@@ -248,8 +277,103 @@ public final class PhaseSnapshot {
         return scoreReadSet.keySet().toArray(new String[0]);
     }
 
+    /**
+     * Return the set of all score keys modified during this Phase.
+     * Backed by oldScoreValues — only keys that were actually written.
+     * Used by ScoreLayer.compensate() for inverse-operation rollback iteration.
+     */
+    public Set<String> scoreKeySet() {
+        return Collections.unmodifiableSet(oldScoreValues.keySet());
+    }
+
     public int scoreCacheSize() { return scoreCache.size(); }
     public int scoreReadSetCount() { return scoreReadSet.size(); }
+
+    // ================================================================
+    //  EXP4: Entity NBT cache (backing store for EntityLayer)
+    // ================================================================
+
+    /** Retrieve a cached NBT value by composite key. */
+    public Object getNbtCached(final String key) {
+        return nbtCache.get(key);
+    }
+
+    /**
+     * Store an NBT value in the cache with old-value recording for compensation.
+     * Only the first old value per key is saved (same semantics as putScore).
+     *
+     * @param key     composite key from EntityLayer.nbtKey()
+     * @param newVal  the value being written (Number or String)
+     * @param oldVal  the value before the write (for rollback compensation)
+     */
+    public void putNbt(final String key, final Object newVal, final Object oldVal) {
+        nbtCache.put(key, newVal);
+        if (oldVal != null && !nbtOldValues.containsKey(key)) {
+            nbtOldValues.put(key, oldVal);
+        }
+    }
+
+    /** Get the pre-write (old) NBT value for a key. */
+    public Object getNbtOldValue(final String key) {
+        return nbtOldValues.get(key);
+    }
+
+    /**
+     * Record an NBT read for OCC validation.
+     * @param key  composite key from EntityLayer.nbtKey()
+     * @param tick current game tick at read time
+     */
+    public void recordNbtRead(final String key, final long tick) {
+        nbtReadSet.putIfAbsent(key, tick);
+    }
+
+    /** Get the NBT read-set for OCC validation. */
+    public Map<String, Long> getNbtReadSet() {
+        return nbtReadSet;
+    }
+
+    /** Return all keys modified in this Phase (for compensation iteration). */
+    public Set<String> nbtKeySet() {
+        return Collections.unmodifiableSet(nbtOldValues.keySet());
+    }
+
+    public int nbtCacheSize() { return nbtCache.size(); }
+    public int nbtReadSetSize() { return nbtReadSet.size(); }
+
+    // ================================================================
+    //  EXP4: DeferredAction queue
+    // ================================================================
+
+    /**
+     * Append a deferred entity lifecycle action. Actions are replayed
+     * in insertion order at Phase commit, or discarded on rollback.
+     */
+    public void addDeferredAction(final DeferredAction action) {
+        deferredActions.add(action);
+    }
+
+    /** All deferred actions in insertion order (for commit replay). */
+    public java.util.List<DeferredAction> getDeferredActions() {
+        return deferredActions;
+    }
+
+    /** Discard all deferred actions (on rollback). */
+    public void clearDeferredActions() {
+        deferredActions.clear();
+        nextVirtualId = -1;
+    }
+
+    /**
+     * Allocate a temporary virtual entity ID for a deferred summon.
+     * Returns negative values starting from -1, -2, -3, ...
+     * These IDs are valid only within the current Phase.
+     */
+    public int nextVirtualId() {
+        return nextVirtualId--;
+    }
+
+    public int deferredActionCount() { return deferredActions.size(); }
+    public boolean hasDeferredActions() { return !deferredActions.isEmpty(); }
 
     // ================================================================
     //  Write path (with rollback support)

@@ -7,8 +7,12 @@
  * Validation checks (in order):
  *
  *   CHECK_READ_SET:  Were any positions in the readSet externally modified
- *                    between the tick they were read and the current tick?
- *                    (Prevents Non-Repeatable Reads — ANSI SQL isolation)
+ *                     between the tick they were read and the current tick?
+ *                     (Prevents Non-Repeatable Reads — ANSI SQL isolation)
+ *
+ *   CHECK_SCORE_READ_SET: Were any score keys in the scoreReadSet externally
+ *                     modified between the tick they were read and now?
+ *                     (Prevents Non-Repeatable Score Reads — EXP4)
  *
  *   CHECK_WRITE_SET: Were any positions in the writeSet concurrently
  *                    modified by another chain? (Prevents Lost Updates)
@@ -108,7 +112,8 @@ public final class PhaseValidator {
     // ================================================================
 
     /**
-     * Validate a Phase's readSet against external modification results.
+     * Validate a Phase's readSet against external modification results
+     * (EXP3: block-only validation; no scoreboard read-set check).
      *
      * @param snap      the PhaseSnapshot to validate
      * @param retryCount how many times this Phase has already been retried
@@ -120,6 +125,26 @@ public final class PhaseValidator {
         final PhaseSnapshot snap,
         final int retryCount,
         final Map<Long, Boolean> externalCheckResults
+    ) {
+        return validate(snap, retryCount, externalCheckResults, null);
+    }
+
+    /**
+     * Validate a Phase's readSet and scoreReadSet against external
+     * modification results (EXP4: full OCC with scoreboard support).
+     *
+     * @param snap                      the PhaseSnapshot to validate
+     * @param retryCount                how many times this Phase has already been retried
+     * @param externalCheckResults      positions → true if externally modified
+     * @param externalScoreCheckResults score keys → true if externally modified (EXP4),
+     *                                  or null to skip score validation
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults,
+        final Map<String, Boolean> externalScoreCheckResults
     ) {
         if (!isEnabled()) {
             return ValidationResult.COMMIT; // bypass when disabled
@@ -154,6 +179,22 @@ public final class PhaseValidator {
             }
         }
 
+        // CHECK_SCORE_READ_SET: detect non-repeatable score reads (EXP4)
+        if (externalScoreCheckResults != null && !externalScoreCheckResults.isEmpty()) {
+            final Map<String, Long> scoreReadSet = snap.getScoreReadSet();
+            if (scoreReadSet != null) {
+                for (final Map.Entry<String, Long> entry : scoreReadSet.entrySet()) {
+                    final String key = entry.getKey();
+                    final Boolean externallyModified = externalScoreCheckResults.get(key);
+                    if (Boolean.TRUE.equals(externallyModified)) {
+                        // This score key was modified externally between the read
+                        // and now → our read is stale → Phase must retry
+                        return ValidationResult.RETRY;
+                    }
+                }
+            }
+        }
+
         // CHECK_WRITE_SET: handled by ChainHead.traversalId supersede
         // (newer traversal automatically invalidates older Continuations).
         // No additional check needed here.
@@ -173,7 +214,8 @@ public final class PhaseValidator {
             return "EXP3 validation disabled (config: validation.enabled=false)";
         }
         return "EXP3 OCC validation: maxReadSet=" + maxReadSetSize()
-            + ", maxRetries=" + maxRetries();
+            + ", maxRetries=" + maxRetries()
+            + " (+ EXP4 score read-set)";
     }
 
     private PhaseValidator() {}
