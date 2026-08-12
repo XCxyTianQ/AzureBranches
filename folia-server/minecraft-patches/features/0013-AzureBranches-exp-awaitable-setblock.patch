@@ -18,7 +18,7 @@ diff --git a/net/minecraft/server/commands/SetBlockCommand.java b/net/minecraft/
 index 582d977..9c0e8f7 100644
 --- a/net/minecraft/server/commands/SetBlockCommand.java
 +++ b/net/minecraft/server/commands/SetBlockCommand.java
-@@ -112,6 +112,63 @@ public class SetBlockCommand {
+@@ -112,6 +112,76 @@ public class SetBlockCommand {
          final boolean strict
      ) throws CommandSyntaxException {
          ServerLevel level = source.getLevel();
@@ -52,6 +52,19 @@ index 582d977..9c0e8f7 100644
 +                            placeNeeded = true;
 +                        }
 +                        BlockState oldState = level.getBlockState(pos);
++                        // AzureBranches - record old state for OCC rollback (EXP4)
++                        final com.azurebranches.command.PhaseSnapshot _rollbackSnap =
++                            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++                        if (_rollbackSnap != null) {
++                            // same-region fast path: the snapshot is visible on this thread,
++                            // so the 3-param putBlock records the pre-write old state
++                            _rollbackSnap.putBlock(pos.asLong(), block.getState(), oldState);
++                        } else {
++                            // cross-region: capture into the per-batch map attached to
++                            // the Continuation, merged back at Phase resume
++                            com.azurebranches.command.ExpChainSupport.captureOldState(
++                                pos.asLong(), oldState);
++                        }
 +                        if (placeNeeded
 +                            && !block.place(level, pos,
 +                                Block.UPDATE_CLIENTS

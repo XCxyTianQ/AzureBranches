@@ -108,6 +108,43 @@ public final class ExpChainSupport {
     private static final ThreadLocal<PhaseSnapshot> PHASE_SNAPSHOT = new ThreadLocal<>();
 
     /**
+     * EXP4: Old-state capture for cross-region writes.
+     *
+     * <p>Deferred remote tasks run on the target region thread, where the home
+     * thread's PhaseSnapshot ThreadLocal is invisible. The Walker sets this
+     * capture map on the remote thread before running the batch, so patched
+     * commands (e.g. /setblock) can record their pre-write block states for
+     * OCC rollback. The map is attached to the Continuation and merged into
+     * the next Phase's oldBlockStates at resume time.</p>
+     */
+    private static final ThreadLocal<Map<Long, Object>> OLD_STATE_CAPTURE = new ThreadLocal<>();
+
+    /**
+     * Begin capturing old block states on this thread into the given map.
+     * Called by the Walker's per-region dispatch task before running entries.
+     */
+    public static void setOldStateCapture(final Map<Long, Object> captureMap) {
+        OLD_STATE_CAPTURE.set(captureMap);
+    }
+
+    /** Stop capturing old block states on this thread. */
+    public static void clearOldStateCapture() {
+        OLD_STATE_CAPTURE.remove();
+    }
+
+    /**
+     * Record a pre-write block state for OCC rollback.
+     * No-op when no capture is active on this thread (e.g. plain command
+     * execution outside an EXP batch). First old state per position wins.
+     */
+    public static void captureOldState(final long pos, final Object oldState) {
+        final Map<Long, Object> capture = OLD_STATE_CAPTURE.get();
+        if (capture != null) {
+            capture.putIfAbsent(pos, oldState);
+        }
+    }
+
+    /**
      * Open a collection scope before dispatching a command block command (EXP only).
      * Backward-compatible: does not create a PhaseSnapshot.
      */

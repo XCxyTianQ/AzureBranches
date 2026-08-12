@@ -169,6 +169,13 @@ public final class PhaseSnapshot {
                     snap.readSet.put(pos, tick);
                 }
             }
+            // EXP4: inherit pre-write old block states captured by the remote
+            // batch, so an OCC conflict can restore the world before retrying.
+            if (cont.oldStateCapture != null) {
+                for (final Map.Entry<Long, Object> e : cont.oldStateCapture.entrySet()) {
+                    snap.oldBlockStates.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
         }
         return snap;
     }
@@ -529,6 +536,32 @@ public final class PhaseSnapshot {
             arr[i++] = pos;
         }
         return arr;
+    }
+
+    // ================================================================
+    //  EXP3: Retry (whole-Phase replay)
+    // ================================================================
+
+    /**
+     * EXP3: Reset this snapshot for a Phase retry.
+     * Clears caches, read-sets and savepoints so the replay re-reads the
+     * world (which has been restored to its pre-Phase state). Compensation
+     * baselines (oldBlockStates / oldScoreValues / nbtOldValues) are kept:
+     * {@code putIfAbsent} semantics preserve the very first pre-write values
+     * across replays.
+     */
+    public void resetForRetry() {
+        blockCache.clear();
+        pendingWritePositions.clear();
+        readSet.clear();
+        savepoints.clear();
+        scoreCache.clear();
+        pendingScoreKeys.clear();
+        scoreReadSet.clear();
+        nbtCache.clear();
+        nbtReadSet.clear();
+        deferredActions.clear();
+        nextVirtualId = -1;
     }
 
     // ================================================================

@@ -84,6 +84,29 @@ public final class Continuation {
      */
     public volatile String[] readSetScoreKeys;
 
+    /**
+     * EXP4: Pre-write old block states captured from the dispatching batch's
+     * remote executions (BlockPos.asLong() → BlockState). Merged into the next
+     * Phase's oldBlockStates by PhaseSnapshot.fromContinuation, so an OCC
+     * conflict can restore the world to its pre-Phase state before retrying.
+     *
+     * <p>Null when the dispatching Phase performed no cross-region writes or
+     * when capture was not wired.</p>
+     */
+    public volatile java.util.Map<Long, Object> oldStateCapture;
+
+    /**
+     * EXP4: BlockPos.asLong() where the Phase that created this Continuation
+     * began walking. Used to replay the whole Phase from its start on retry.
+     */
+    public volatile long phaseStartPos;
+
+    /**
+     * EXP4: Direction.get3DDataValue() at Phase start. Used with phaseStartPos
+     * for Phase replay on retry.
+     */
+    public volatile int phaseStartDir;
+
     Continuation(final long traversalId, final long cursorPos, final int direction3d,
                  final int remaining, final int stepCount) {
         this.traversalId = traversalId;

@@ -57,7 +57,7 @@ index 9a9337a..b7918a4 100644
              head.endTraversal();
          }
      }
-@@ -386,8 +393,21 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+@@ -386,8 +393,26 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
              regionFutures.add(regionDone);
          }
  
@@ -77,6 +77,11 @@ index 9a9337a..b7918a4 100644
 +            cont = head.createContinuation(lastRunPos.asLong(), currentDirection.get3DDataValue(),
 +                remaining, batchStepCount);
 +        }
++        // EXP4: attach the captured pre-write old states and the Phase start
++        // so an OCC conflict can restore the world and replay the whole Phase.
++        cont.oldStateCapture = oldStateCapture;
++        cont.phaseStartPos = phaseStartPos.asLong();
++        cont.phaseStartDir = phaseStartDir.get3DDataValue();
 +        // AzureBranches end - Phase-Based snapshot
  
          java.util.concurrent.CompletableFuture.allOf(

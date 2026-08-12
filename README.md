@@ -49,7 +49,7 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 - IsolationLevel 枚举：SNAPSHOT / READ_COMMITTED
 - 构建时 codegen：规避 paperweight 3-way merge 行号漂移
 
-### EXP4 — 完整实体 OCC 栈（当前版本）
+### EXP4 — 完整实体 OCC 栈
 
 **ScoreLayer — 积分板逆操作补偿**
 - 基于整数加法群 (Z, +) 的阿贝尔性质，使用 Δ 逆操作替代值恢复
@@ -75,6 +75,28 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 - CHECK_SCORE_READ_SET：积分板 OCC 读集验证
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4) 及 `F:\AzureCore\AzureDoc\` 下的完整技术文档。
+
+### EXP4Plus — 跨区命令恢复（当前版本）
+
+**RegionCommandExecutor — 跨区执行桥**
+- 同步阻塞 + 2s 超时的跨 region RPC 原语：`onBlock`（queueOrExecuteTickTask）/ `onEntity`（EntityScheduler.scheduleOrExecute）
+- `CommandSyntaxException` 跨线程透传；超时兜底保证两 region 互等死锁最多 2 秒
+- 自定义 `BlockTask` / `EntityTask` 函数接口，值对象跨线程传递
+
+**Folia 被禁命令恢复（/data /tag /trigger）**
+- vanilla 命令树原样保留，只改造数据访问层（accessor / 执行体），无需重写命令
+- `BlockDataAccessor` / `EntityDataAccessor`：`getData`/`setData` 在目标 region 线程执行，源线程不再跨区解引用
+- `TagCommand` / `TriggerCommand`：逐实体跳转所属 region（含 displayName 目标区获取）
+
+**构建：azurepatches 覆盖层**
+- `azurepatches-src`（覆盖现有文件，fail-fast 校验目标存在）+ `azurepatches-new`（新增类）
+- 规避手写 patch 的 hunk 维护成本；applyAllPatches + transformSource 之后整文件覆盖
+
+**Folia 上游修复**
+- 控制台 null-level 兜底：`executeCommandInContext` / `broadcastToAdmins`（修复前所有控制台命令含 /stop 均 NPE）
+- OCC 回滚恢复失败不再静默：逐条记录日志
+
+详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4Plus) 及 `F:\AzureCore\AzureDoc\` 下的完整技术文档。
 
 ## 架构概览
 
@@ -152,6 +174,7 @@ rm -f folia-server/build/cache/folia-paperclip.jar
 | EXP2_PB | Walking/Waiting 分离与 Continuation MVCC | [v26.1.2-EXP2_PB](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP2_PB) |
 | EXP3 | OCC 乐观验证系统（含数据库理论溯源） | [v26.1.2-EXP3](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP3) |
 | **EXP4** | **完整实体 OCC 栈（ScoreLayer / EntityLayer / DeferredAction）** | [**v26.1.2-EXP4**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4) |
+| **EXP4Plus** | **跨区命令恢复（RegionCommandExecutor + /data /tag /trigger）** | [**v26.1.2-EXP4Plus**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4Plus) |
 
 ## 理论基础
 

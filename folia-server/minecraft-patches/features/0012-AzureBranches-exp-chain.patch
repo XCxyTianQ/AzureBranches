@@ -49,7 +49,7 @@ index b05a5a2..9a9337a 100644
          BlockPos.MutableBlockPos pos = blockPos.mutable();
          GameRules gameRules = level.getGameRules();
          int maxIterations = gameRules.get(GameRules.MAX_COMMAND_SEQUENCE_LENGTH);
-@@ -220,4 +231,217 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+@@ -220,4 +231,239 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
              LOGGER.warn("Command Block chain tried to execute more than {} steps!", limit);
          }
      }
@@ -82,6 +82,9 @@ index b05a5a2..9a9337a 100644
 +        int walkRemaining = remaining;
 +        BlockPos lastRunPos = null;
 +        BlockPos firstBatchPos = null;
++        // AzureBranches - Phase start for OCC retry replay (EXP4)
++        final BlockPos phaseStartPos = pos.immutable();
++        final Direction phaseStartDir = direction;
 +
 +        while (walkRemaining-- > 0) {
 +            pos.move(direction);
@@ -133,7 +136,8 @@ index b05a5a2..9a9337a 100644
 +
 +                    if (conditionalBoundary || sizeBoundary) {
 +                        dispatchAndSuspend(head, level, headBlock, firstBatchPos, pos.immutable(),
-+                            direction, walkRemaining, batchRegistry, batchStepCount);
++                            direction, walkRemaining, batchRegistry, batchStepCount,
++                            phaseStartPos, phaseStartDir);
 +                        return;
 +                    }
 +                } else {
@@ -159,7 +163,7 @@ index b05a5a2..9a9337a 100644
 +
 +        if (!batchRegistry.isEmpty()) {
 +            dispatchAndSuspend(head, level, headBlock, firstBatchPos, lastRunPos, direction,
-+                walkRemaining, batchRegistry, batchStepCount);
++                walkRemaining, batchRegistry, batchStepCount, phaseStartPos, phaseStartDir);
 +        } else {
 +            head.endTraversal();
 +        }
@@ -172,9 +176,22 @@ index b05a5a2..9a9337a 100644
 +        final Direction currentDirection, final int remaining,
 +        final java.util.LinkedHashMap<Long,
 +            java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>> batchRegistry,
-+        final int batchStepCount) {
++        final int batchStepCount, final BlockPos phaseStartPos, final Direction phaseStartDir) {
 +
 +        com.azurebranches.command.ExpChainSupport.onSuspend();
++
++        // EXP4: capture pre-write old block states from the remote batch
++        // executions; the map is attached to the Continuation below and
++        // merged into the next Phase's oldBlockStates at resume time.
++        // Same-region writes already recorded their old states in the Phase
++        // snapshot - fold them in so the rollback baseline covers both paths.
++        final com.azurebranches.command.PhaseSnapshot _captureSnap =
++            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++        final java.util.Map<Long, Object> oldStateCapture =
++            new java.util.concurrent.ConcurrentHashMap<>();
++        if (_captureSnap != null) {
++            oldStateCapture.putAll(_captureSnap.getOldBlockStates());
++        }
 +
 +        final java.util.List<java.util.concurrent.CompletableFuture<Void>> regionFutures =
 +            new java.util.ArrayList<>(batchRegistry.size());
@@ -194,15 +211,20 @@ index b05a5a2..9a9337a 100644
 +
 +            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
 +                .queueOrExecuteTickTask(level, targetCx, targetCz, () -> {
-+                    for (final com.azurebranches.command.ExpChainSupport.DeferredEntry entry : entries) {
-+                        try {
-+                            entry.remoteTask.run();
-+                            entry.resultFuture.complete(Boolean.TRUE);
-+                        } catch (final Exception ex) {
-+                            entry.resultFuture.completeExceptionally(ex);
++                    com.azurebranches.command.ExpChainSupport.setOldStateCapture(oldStateCapture);
++                    try {
++                        for (final com.azurebranches.command.ExpChainSupport.DeferredEntry entry : entries) {
++                            try {
++                                entry.remoteTask.run();
++                                entry.resultFuture.complete(Boolean.TRUE);
++                            } catch (final Exception ex) {
++                                entry.resultFuture.completeExceptionally(ex);
++                            }
 +                        }
++                        regionDone.complete(null);
++                    } finally {
++                        com.azurebranches.command.ExpChainSupport.clearOldStateCapture();
 +                    }
-+                    regionDone.complete(null);
 +                });
 +
 +            regionFutures.add(regionDone);

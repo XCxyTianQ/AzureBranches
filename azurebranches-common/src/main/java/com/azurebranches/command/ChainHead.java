@@ -78,6 +78,14 @@ public final class ChainHead {
     /** Estimated average remote latency in ticks; used for MAX_PENDING heuristics. */
     volatile int avgSuspendTicks = 1;
 
+    /**
+     * EXP3: Retry count carried into the next Continuation created by this head.
+     * Set by the OCC RETRY branch (home region thread) before async rollback +
+     * replay; consumed by createContinuation so retries accumulate across
+     * Phases instead of resetting to 0 on every new Continuation.
+     */
+    volatile int carryRetryCount;
+
     private ChainHead(final ChainKey key) {
         this.key = key;
     }
@@ -109,6 +117,8 @@ public final class ChainHead {
         walking = true;
         final long id = nextTraversalId.incrementAndGet();
         currentTraversalId = id;
+        // EXP3: a fresh traversal starts with a clean retry budget
+        this.carryRetryCount = 0;
         // EXP3: deterministic random seed for retry consistency
         this.traversalRandomSeed = deterministicHash(id, worldSeed);
         for (final Continuation c : pendingContinuations) {
@@ -148,8 +158,25 @@ public final class ChainHead {
                                            final int remaining, final int stepCount) {
         final Continuation c = new Continuation(currentTraversalId, cursorPos, direction3d,
             remaining, stepCount);
+        // EXP3: carry the OCC retry count from a previous Phase replay
+        c.retryCount = takeCarryRetryCount();
         pendingContinuations.add(c);
         return c;
+    }
+
+    /**
+     * EXP3: Remember the retry count for the next Continuation this head creates.
+     * Called on the home region thread when an OCC conflict schedules a retry.
+     */
+    public void setCarryRetryCount(final int retryCount) {
+        this.carryRetryCount = retryCount;
+    }
+
+    /** EXP3: Read and clear the carried retry count (consumed by createContinuation). */
+    public int takeCarryRetryCount() {
+        final int v = carryRetryCount;
+        carryRetryCount = 0;
+        return v;
     }
 
     /**

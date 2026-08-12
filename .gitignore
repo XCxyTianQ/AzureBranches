@@ -35,3 +35,7 @@ _wip_io/
 
 # Paperweight task cache
 .gradle/folia-server/src/minecraft/
+
+# Reasonix tooling
+.reasonix/
+reasonix.toml
