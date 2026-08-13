@@ -215,7 +215,7 @@ public class Commands {
         FillCommand.register(this.dispatcher, context);
         FillBiomeCommand.register(this.dispatcher, context);
         ForceLoadCommand.register(this.dispatcher);
-        //FunctionCommand.register(this.dispatcher); // Folia - region threading - TODO
+        FunctionCommand.register(this.dispatcher); // AzureBranches: restored - function execution is already region-threaded
         GameModeCommand.register(this.dispatcher);
         GameRuleCommand.register(this.dispatcher, context);
         GiveCommand.register(this.dispatcher, context);
