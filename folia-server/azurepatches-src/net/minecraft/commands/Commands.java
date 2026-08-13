@@ -200,7 +200,7 @@ public class Commands {
         ExecuteCommand.register(this.dispatcher, context);
         //BossBarCommands.register(this.dispatcher, context); // Folia - region threading - TODO
         ClearInventoryCommands.register(this.dispatcher, context);
-        //CloneCommands.register(this.dispatcher, context); // Folia - region threading - TODO
+        CloneCommands.register(this.dispatcher, context); // AzureBranches: restored - loadChunksAsync preload
         DamageCommand.register(this.dispatcher, context);
         DataCommands.register(this.dispatcher); // AzureBranches: restored - region-aware accessors
         DataPackCommand.register(this.dispatcher, context); // AzureBranches: restored - reload on global tick
@@ -225,7 +225,7 @@ public class Commands {
         KillCommand.register(this.dispatcher);
         ListPlayersCommand.register(this.dispatcher);
         LocateCommand.register(this.dispatcher, context);
-        //LootCommand.register(this.dispatcher, context); // Folia - region threading - TODO later
+        LootCommand.register(this.dispatcher, context); // AzureBranches: restored - block loot via region hop
         MsgCommand.register(this.dispatcher);
         SwingCommand.register(this.dispatcher);
         ParticleCommand.register(this.dispatcher, context);
@@ -247,7 +247,7 @@ public class Commands {
         SetSpawnCommand.register(this.dispatcher);
         SetWorldSpawnCommand.register(this.dispatcher);
         //SpectateCommand.register(this.dispatcher); // Folia - region threading - TODO later
-        //SpreadPlayersCommand.register(this.dispatcher); // Folia - region threading - TODO later
+        SpreadPlayersCommand.register(this.dispatcher); // AzureBranches: restored - per-entity region teleport
         StopSoundCommand.register(this.dispatcher);
         StopwatchCommand.register(this.dispatcher);
         SummonCommand.register(this.dispatcher, context);
