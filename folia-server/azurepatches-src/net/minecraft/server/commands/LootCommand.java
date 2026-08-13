@@ -387,13 +387,15 @@ public class LootCommand {
 
     private static int dropInWorld(final CommandSourceStack source, final Vec3 pos, final List<ItemStack> drops, final LootCommand.Callback callback) throws CommandSyntaxException {
         ServerLevel level = source.getLevel();
-        drops.forEach(drop -> {
-            ItemEntity entity = new ItemEntity(level, pos.x, pos.y, pos.z, drop.copy());
-            entity.setDefaultPickUpDelay();
-            level.addFreshEntity(entity);
+        return RegionCommandExecutor.onBlockRegion(level, net.minecraft.util.Mth.floor(pos.x) >> 4, net.minecraft.util.Mth.floor(pos.z) >> 4, () -> {
+            drops.forEach(drop -> {
+                ItemEntity entity = new ItemEntity(level, pos.x, pos.y, pos.z, drop.copy());
+                entity.setDefaultPickUpDelay();
+                level.addFreshEntity(entity);
+            });
+            callback.accept(drops);
+            return drops.size();
         });
-        callback.accept(drops);
-        return drops.size();
     }
 
     private static void callback(final CommandSourceStack source, final List<ItemStack> drops) {
@@ -454,10 +456,11 @@ public class LootCommand {
     }
 
     private static int dropKillLoot(final CommandContext<CommandSourceStack> context, final Entity target, final LootCommand.DropConsumer output) throws CommandSyntaxException {
-        Optional<ResourceKey<LootTable>> lootTableId = target.getLootTable();
-        if (lootTableId.isEmpty()) {
-            throw ERROR_NO_ENTITY_LOOT_TABLE.create(target.getDisplayName());
-        } else {
+        return RegionCommandExecutor.onEntity(target, (Entity t) -> {
+            Optional<ResourceKey<LootTable>> lootTableId = t.getLootTable();
+            if (lootTableId.isEmpty()) {
+                throw ERROR_NO_ENTITY_LOOT_TABLE.create(t.getDisplayName());
+            }
             CommandSourceStack source = context.getSource();
             LootParams.Builder builder = new LootParams.Builder(source.getLevel());
             Entity killer = source.getEntity();
@@ -465,16 +468,16 @@ public class LootCommand {
                 builder.withParameter(LootContextParams.LAST_DAMAGE_PLAYER, player);
             }
 
-            builder.withParameter(LootContextParams.DAMAGE_SOURCE, target.damageSources().magic());
+            builder.withParameter(LootContextParams.DAMAGE_SOURCE, t.damageSources().magic());
             builder.withOptionalParameter(LootContextParams.DIRECT_ATTACKING_ENTITY, killer);
             builder.withOptionalParameter(LootContextParams.ATTACKING_ENTITY, killer);
-            builder.withParameter(LootContextParams.THIS_ENTITY, target);
+            builder.withParameter(LootContextParams.THIS_ENTITY, t);
             builder.withParameter(LootContextParams.ORIGIN, source.getPosition());
             LootParams lootParams = builder.create(LootContextParamSets.ENTITY);
             LootTable lootTable = source.getServer().reloadableRegistries().getLootTable(lootTableId.get());
             List<ItemStack> drops = lootTable.getRandomItems(lootParams);
             return output.accept(context, drops, usedItems -> callback(source, usedItems, lootTableId.get()));
-        }
+        });
     }
 
     private static int dropChestLoot(final CommandContext<CommandSourceStack> context, final Holder<LootTable> lootTable, final LootCommand.DropConsumer output) throws CommandSyntaxException {

@@ -258,12 +258,16 @@ public class SpreadPlayersCommand {
 
             // Folia start - region threading: teleport on the entity's own region
             final double _x = Mth.floor(position.x) + 0.5;
-            final double _y = position.getSpawnY(level, maxHeight);
             final double _z = Mth.floor(position.z) + 0.5;
-            entity.getBukkitEntity().taskScheduler.scheduleOrExecute((Entity e) ->
-                e.teleportTo(level, _x, _y, _z, Set.of(), e.getYRot(), e.getXRot(), true,
-                    org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND)
-            );
+            final int _cx = Mth.floor(position.x) >> 4;
+            final int _cz = Mth.floor(position.z) >> 4;
+            // Compute the spawn Y on the target chunk's region (getSpawnY reads
+            // block states vertically), then teleport on the entity's region.
+            RegionCommandExecutor.onBlockRegionAsync(level, _cx, _cz, () -> position.getSpawnY(level, maxHeight))
+                .thenAccept(_y -> entity.getBukkitEntity().taskScheduler.scheduleOrExecute((Entity e) ->
+                    e.teleportTo(level, _x, _y, _z, Set.of(), e.getYRot(), e.getXRot(), true,
+                        org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND)
+                ));
             // Folia end - region threading
             double closest = Double.MAX_VALUE;
 
