@@ -5,10 +5,12 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+import com.mojang.brigadier.suggestion.Suggestions;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
@@ -17,6 +19,13 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.ComponentUtils;
 import net.minecraft.world.entity.Entity;
 
+/**
+ * AzureBranches EXP4Plus: /tag restored with a fully asynchronous, non-blocking
+ * execution model. Every per-entity read/modify hops to the owning region via
+ * {@code RegionCommandExecutor.onEntityAsync} and the success/failure feedback is
+ * routed back to the source region via {@code runOnSource}; the region thread
+ * never blocks on a distant entity.
+ */
 public class TagCommand {
     private static final SimpleCommandExceptionType ERROR_ADD_FAILED = new SimpleCommandExceptionType(Component.translatable("commands.tag.add.failed"));
     private static final SimpleCommandExceptionType ERROR_REMOVE_FAILED = new SimpleCommandExceptionType(Component.translatable("commands.tag.remove.failed"));
@@ -41,7 +50,7 @@ public class TagCommand {
                             Commands.literal("remove")
                                 .then(
                                     Commands.argument("name", StringArgumentType.word())
-                                        .suggests((c, p) -> SharedSuggestionProvider.suggest(getTags(EntityArgument.getEntities(c, "targets")), p))
+                                        .suggests((c, p) -> suggestTags(EntityArgument.getEntities(c, "targets"), p))
                                         .executes(
                                             c -> removeTag(c.getSource(), EntityArgument.getEntities(c, "targets"), StringArgumentType.getString(c, "name"))
                                         )
@@ -52,102 +61,120 @@ public class TagCommand {
         );
     }
 
-    private static Collection<String> getTags(final Collection<? extends Entity> entities) throws CommandSyntaxException {
-        Set<String> result = Sets.newHashSet();
-        for (Entity entity : entities) {
-            // AzureBranches: read tags on the region owning the entity
-            result.addAll(
-                RegionCommandExecutor.onEntity(entity, (Entity e) -> Sets.newHashSet(e.entityTags()))
-            );
-        }
-        return result;
+    private static CompletableFuture<Suggestions> suggestTags(final Collection<? extends Entity> entities, final com.mojang.brigadier.suggestion.SuggestionsBuilder builder) {
+        return gatherTagsAsync(entities).thenCompose(tags -> SharedSuggestionProvider.suggest(tags, builder));
     }
 
-    private static int addTag(final CommandSourceStack source, final Collection<? extends Entity> targets, final String name) throws CommandSyntaxException {
-        int count = 0;
-        List<Component> names = new ArrayList<>();
-
-        for (Entity entity : targets) {
-            // AzureBranches: modify tags on the region owning the entity
-            TagResult result = RegionCommandExecutor.onEntity(entity, (Entity e) ->
-                new TagResult(e.addTag(name), e.getDisplayName(), null));
-            if (result.changed()) {
-                count++;
-                names.add(result.displayName());
-            }
+    private static CompletableFuture<Collection<String>> gatherTagsAsync(final Collection<? extends Entity> entities) {
+        final List<CompletableFuture<Set<String>>> futures = new ArrayList<>(entities.size());
+        for (final Entity entity : entities) {
+            futures.add(RegionCommandExecutor.onEntityAsync(entity, (Entity e) -> Sets.newHashSet(e.entityTags())));
         }
+        if (futures.isEmpty()) {
+            return CompletableFuture.completedFuture(Set.of());
+        }
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).thenApply(v -> {
+            final Set<String> result = Sets.newHashSet();
+            for (final CompletableFuture<Set<String>> f : futures) {
+                result.addAll(f.join());
+            }
+            return result;
+        });
+    }
 
-        if (count == 0) {
-            throw ERROR_ADD_FAILED.create();
-        } else {
+    private static List<CompletableFuture<TagResult>> collect(final Collection<? extends Entity> targets, final java.util.function.Function<Entity, TagResult> op) {
+        final List<CompletableFuture<TagResult>> futures = new ArrayList<>(targets.size());
+        for (final Entity entity : targets) {
+            futures.add(RegionCommandExecutor.onEntityAsync(entity, (Entity e) -> op.apply(e)));
+        }
+        return futures;
+    }
+
+    private static int addTag(final CommandSourceStack source, final Collection<? extends Entity> targets, final String name) {
+        final List<CompletableFuture<TagResult>> futures = collect(targets, e -> new TagResult(e.addTag(name), e.getDisplayName(), null));
+        joinAndReport(source, futures, () -> ERROR_ADD_FAILED.create(), (count, names) -> {
             if (targets.size() == 1) {
                 source.sendSuccess(() -> Component.translatable("commands.tag.add.success.single", name, names.get(0)), true);
             } else {
-                final int finalCount = count;
-                source.sendSuccess(() -> Component.translatable("commands.tag.add.success.multiple", name, finalCount), true);
+                source.sendSuccess(() -> Component.translatable("commands.tag.add.success.multiple", name, count), true);
             }
-
-            return count;
-        }
+        });
+        return targets.size(); // optimistic placeholder; the real result completes asynchronously
     }
 
-    private static int removeTag(final CommandSourceStack source, final Collection<? extends Entity> targets, final String name) throws CommandSyntaxException {
-        int count = 0;
-        List<Component> names = new ArrayList<>();
-
-        for (Entity entity : targets) {
-            // AzureBranches: modify tags on the region owning the entity
-            TagResult result = RegionCommandExecutor.onEntity(entity, (Entity e) ->
-                new TagResult(e.removeTag(name), e.getDisplayName(), null));
-            if (result.changed()) {
-                count++;
-                names.add(result.displayName());
-            }
-        }
-
-        if (count == 0) {
-            throw ERROR_REMOVE_FAILED.create();
-        } else {
+    private static int removeTag(final CommandSourceStack source, final Collection<? extends Entity> targets, final String name) {
+        final List<CompletableFuture<TagResult>> futures = collect(targets, e -> new TagResult(e.removeTag(name), e.getDisplayName(), null));
+        joinAndReport(source, futures, () -> ERROR_REMOVE_FAILED.create(), (count, names) -> {
             if (targets.size() == 1) {
                 source.sendSuccess(() -> Component.translatable("commands.tag.remove.success.single", name, names.get(0)), true);
             } else {
-                final int finalCount = count;
-                source.sendSuccess(() -> Component.translatable("commands.tag.remove.success.multiple", name, finalCount), true);
+                source.sendSuccess(() -> Component.translatable("commands.tag.remove.success.multiple", name, count), true);
             }
-
-            return count;
-        }
+        });
+        return targets.size();
     }
 
-    private static int listTags(final CommandSourceStack source, final Collection<? extends Entity> targets) throws CommandSyntaxException {
-        Set<String> tags = Sets.newHashSet();
-        List<Component> names = new ArrayList<>();
+    private static int listTags(final CommandSourceStack source, final Collection<? extends Entity> targets) {
+        final List<CompletableFuture<TagResult>> futures = collect(targets, e -> new TagResult(false, e.getDisplayName(), Sets.newHashSet(e.entityTags())));
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).whenComplete((v, ex) ->
+            RegionCommandExecutor.runOnSource(source, () -> {
+                if (ex != null) {
+                    source.sendFailure(Component.literal("commands.tag.failed"));
+                    return;
+                }
+                final Set<String> tags = Sets.newHashSet();
+                final List<Component> names = new ArrayList<>(futures.size());
+                for (final CompletableFuture<TagResult> f : futures) {
+                    final TagResult r = f.join();
+                    names.add(r.displayName());
+                    tags.addAll(r.tags());
+                }
+                if (targets.size() == 1) {
+                    if (tags.isEmpty()) {
+                        source.sendSuccess(() -> Component.translatable("commands.tag.list.single.empty", names.get(0)), false);
+                    } else {
+                        source.sendSuccess(() -> Component.translatable("commands.tag.list.single.success", names.get(0), tags.size(), ComponentUtils.formatList(tags)), false);
+                    }
+                } else if (tags.isEmpty()) {
+                    source.sendSuccess(() -> Component.translatable("commands.tag.list.multiple.empty", targets.size()), false);
+                } else {
+                    source.sendSuccess(() -> Component.translatable("commands.tag.list.multiple.success", targets.size(), tags.size(), ComponentUtils.formatList(tags)), false);
+                }
+            })
+        );
+        return targets.size();
+    }
 
-        for (Entity entity : targets) {
-            // AzureBranches: read tags on the region owning the entity
-            TagResult result = RegionCommandExecutor.onEntity(entity, (Entity e) ->
-                new TagResult(false, e.getDisplayName(), Sets.newHashSet(e.entityTags())));
-            tags.addAll(result.tags());
-            names.add(result.displayName());
-        }
-
-        if (targets.size() == 1) {
-            if (tags.isEmpty()) {
-                source.sendSuccess(() -> Component.translatable("commands.tag.list.single.empty", names.get(0)), false);
-            } else {
-                source.sendSuccess(
-                    () -> Component.translatable("commands.tag.list.single.success", names.get(0), tags.size(), ComponentUtils.formatList(tags)),
-                    false
-                );
-            }
-        } else if (tags.isEmpty()) {
-            source.sendSuccess(() -> Component.translatable("commands.tag.list.multiple.empty", targets.size()), false);
-        } else {
-            source.sendSuccess(
-                () -> Component.translatable("commands.tag.list.multiple.success", targets.size(), tags.size(), ComponentUtils.formatList(tags)), false
-            );
-        }
-
-        return tags.size();
+    private static void joinAndReport(
+        final CommandSourceStack source,
+        final List<CompletableFuture<TagResult>> futures,
+        final java.util.function.Supplier<CommandSyntaxException> errorSupplier,
+        final java.util.function.BiConsumer<Integer, List<Component>> success
+    ) {
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).whenComplete((v, ex) ->
+            RegionCommandExecutor.runOnSource(source, () -> {
+                if (ex != null) {
+                    source.sendFailure(Component.literal("commands.tag.failed"));
+                    return;
+                }
+                int count = 0;
+                final List<Component> names = new ArrayList<>(futures.size());
+                for (final CompletableFuture<TagResult> f : futures) {
+                    final TagResult r = f.join();
+                    if (r.changed()) {
+                        count++;
+                        names.add(r.displayName());
+                    }
+                }
+                if (count == 0) {
+                    final CommandSyntaxException err = errorSupplier.get();
+                    if (err != null) {
+                        source.sendFailure(ComponentUtils.fromMessage(err.getRawMessage()));
+                    }
+                } else {
+                    success.accept(count, names);
+                }
+            })
+        );
     }
 }

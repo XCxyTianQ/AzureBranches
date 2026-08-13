@@ -249,25 +249,7 @@ tasks.register("buildFolia") {
                     "        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, nextPhaseSnap);" to
                     "final com.azurebranches.command.PhaseSnapshot nextPhaseSnap =\n" +
                     "            com.azurebranches.command.PhaseSnapshot.fromContinuation(cont, level.getGameTime());\n" +
-                    "        // EXP3: OCC validation\n" +
-                    "        if (com.azurebranches.command.PhaseValidator.isEnabled()) {\n" +
-                    "            final com.azurebranches.command.PhaseValidator.ValidationResult result =\n" +
-                    "                com.azurebranches.command.PhaseValidator.validate(\n" +
-                    "                    nextPhaseSnap, cont.retryCount, java.util.Map.of());\n" +
-                    "            switch (result) {\n" +
-                    "                case COMMIT -> com.azurebranches.command.ExpChainSupport.onValidationPassed();\n" +
-                    "                case RETRY -> {\n" +
-                    "                    com.azurebranches.command.ExpChainSupport.onValidationRetry();\n" +
-                    "                    cont.retryCount++;\n" +
-                    "                    head.setCarryRetryCount(cont.retryCount);\n" +
-                    "                    rollbackAndRetryExpChain(head, level, headBlock, cont, nextPhaseSnap);\n" +
-                    "                    return; // EXP4: rollback + replay run asynchronously — do not continue walking here\n" +
-                    "                }\n" +
-                    "                case RETRY_EXHAUSTED -> com.azurebranches.command.ExpChainSupport.onValidationExhausted();\n" +
-                    "                case READ_SET_OVERFLOW -> {}\n" +
-                    "            }\n" +
-                    "        }\n" +
-                    "        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, nextPhaseSnap);",
+                    "        verifyReadSetAndResume(head, level, headBlock, cont, resumePos, resumeDir, nextPhaseSnap);",
 
                 // EXP4: OCC rollback & retry — restore pre-write old states on the
                 // target regions, then replay the whole Phase from its start.
@@ -361,6 +343,80 @@ tasks.register("buildFolia") {
         walkExpChain(head, level, headBlock, retryPos, retryDir,
             cont.remaining + cont.stepCount, phaseSnap);
     }
+
+    // EXP4Plus: verify the Phase read-set against the live world on each
+    // owning region, then commit or rollback + replay. This replaces the
+    // previous empty-read-set validate() call, so an external write to a
+    // position we read now actually triggers an OCC retry.
+    private static void verifyReadSetAndResume(
+        final com.azurebranches.command.ChainHead head,
+        final ServerLevel level, final BlockPos headBlock,
+        final com.azurebranches.command.Continuation cont,
+        final BlockPos.MutableBlockPos resumePos, final Direction resumeDir,
+        final com.azurebranches.command.PhaseSnapshot phaseSnap) {
+
+        if (!com.azurebranches.command.PhaseValidator.isEnabled()) {
+            walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
+            return;
+        }
+
+        final java.util.Map<Long, Object> readValues = phaseSnap.getReadSetValues();
+        if (readValues == null || readValues.isEmpty()) {
+            com.azurebranches.command.ExpChainSupport.onValidationPassed();
+            walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
+            return;
+        }
+
+        final java.util.Map<Long, Boolean> modified = new java.util.concurrent.ConcurrentHashMap<>();
+        final java.util.List<java.util.concurrent.CompletableFuture<Void>> checks =
+            new java.util.ArrayList<>(readValues.size());
+        for (final java.util.Map.Entry<Long, Object> entry : readValues.entrySet()) {
+            final BlockPos checkPos = BlockPos.of(entry.getKey());
+            final Object expected = entry.getValue();
+            final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
+            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+                .queueOrExecuteTickTask(level, checkPos.getX() >> 4, checkPos.getZ() >> 4, () -> {
+                    try {
+                        final BlockState current = level.getBlockState(checkPos);
+                        modified.put(entry.getKey(), !java.util.Objects.equals(current, expected));
+                    } finally {
+                        done.complete(null);
+                    }
+                });
+            checks.add(done);
+        }
+
+        java.util.concurrent.CompletableFuture.allOf(
+            checks.toArray(new java.util.concurrent.CompletableFuture[0]))
+            .whenComplete((v, ex) ->
+                io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+                    .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
+                        if (!head.isCurrent(cont)) {
+                            com.azurebranches.command.ExpChainSupport.onSupersede();
+                            return;
+                        }
+                        final com.azurebranches.command.PhaseValidator.ValidationResult result =
+                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified);
+                        switch (result) {
+                            case COMMIT -> {
+                                com.azurebranches.command.ExpChainSupport.onValidationPassed();
+                                walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
+                            }
+                            case RETRY -> {
+                                com.azurebranches.command.ExpChainSupport.onValidationRetry();
+                                cont.retryCount++;
+                                head.setCarryRetryCount(cont.retryCount);
+                                rollbackAndRetryExpChain(head, level, headBlock, cont, phaseSnap);
+                            }
+                            case RETRY_EXHAUSTED -> {
+                                com.azurebranches.command.ExpChainSupport.onValidationExhausted();
+                                walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
+                            }
+                            case READ_SET_OVERFLOW ->
+                                walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
+                        }
+                    }));
+    }
     // AzureBranches end - EXP suspendable chain implementation (v2)"""
             )
 
@@ -394,9 +450,9 @@ tasks.register("buildFolia") {
                     "            }\n" +
                     "            ChunkAccess chunk = this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true); // Paper - manually inline to reduce hops and avoid unnecessary null check to reduce total byte code size, this should never return null and if it does we will see it the next line but the real stack trace will matter in the chunk engine\n" +
                     "            BlockState result = chunk.getBlockState(pos);\n" +
-                    "            // AzureBranches EXP4: record read for OCC validation\n" +
+                    "            // AzureBranches EXP4Plus: record read with observed state for OCC validation\n" +
                     "            if (_exp4snap != null) {\n" +
-                    "                _exp4snap.recordRead(pos.asLong(),\n" +
+                    "                _exp4snap.recordRead(pos.asLong(), result,\n" +
                     "                    ((net.minecraft.server.level.ServerLevel) this).getGameTime());\n" +
                     "            }\n" +
                     "            return result;\n" +
@@ -487,7 +543,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP4Plus.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP5.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

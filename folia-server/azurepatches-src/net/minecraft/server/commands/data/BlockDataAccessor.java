@@ -6,6 +6,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import com.mojang.logging.LogUtils;
 import java.util.Locale;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -79,9 +80,31 @@ public class BlockDataAccessor implements DataAccessor {
     }
 
     @Override
+    public CompletableFuture<Void> setDataAsync(final CompoundTag tag) {
+        return net.minecraft.server.commands.RegionCommandExecutor.<Void>onBlockAsync(this.level, this.pos, () -> {
+            BlockEntity entity = resolveEntity();
+            BlockState state = this.level.getBlockState(this.pos);
+            try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(entity.problemPath(), LOGGER)) {
+                entity.loadWithComponents(TagValueInput.create(reporter, this.level.registryAccess(), tag));
+                entity.setChanged();
+                this.level.sendBlockUpdated(this.pos, state, state, Block.UPDATE_ALL);
+            }
+            return null;
+        });
+    }
+
+    @Override
     public CompoundTag getData() throws CommandSyntaxException {
         // AzureBranches: hop to the region owning this block position
         return net.minecraft.server.commands.RegionCommandExecutor.onBlock(this.level, this.pos, () -> {
+            BlockEntity entity = resolveEntity();
+            return entity.saveWithFullMetadata(this.level.registryAccess());
+        });
+    }
+
+    @Override
+    public CompletableFuture<CompoundTag> getDataAsync() {
+        return net.minecraft.server.commands.RegionCommandExecutor.onBlockAsync(this.level, this.pos, () -> {
             BlockEntity entity = resolveEntity();
             return entity.saveWithFullMetadata(this.level.registryAccess());
         });

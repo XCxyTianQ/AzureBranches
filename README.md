@@ -76,7 +76,7 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4) 及 `F:\AzureCore\AzureDoc\` 下的完整技术文档。
 
-### EXP4Plus — 跨区命令恢复（当前版本）
+### EXP4Plus — 跨区命令恢复
 
 **RegionCommandExecutor — 跨区执行桥**
 - 同步阻塞 + 2s 超时的跨 region RPC 原语：`onBlock`（queueOrExecuteTickTask）/ `onEntity`（EntityScheduler.scheduleOrExecute）
@@ -97,6 +97,30 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 - OCC 回滚恢复失败不再静默：逐条记录日志
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4Plus) 及 `F:\AzureCore\AzureDoc\` 下的完整技术文档。
+
+### EXP5 — 非阻塞命令执行 + OCC 回滚接通（当前版本）
+
+**RegionCommandExecutor 非阻塞化**
+- 新增异步原语 `onBlockAsync` / `onEntityAsync`（返回 CompletableFuture，region 线程不阻塞）
+- `runOnSource` 把 sendSuccess/sendFailure 路由回源 region；控制台 null-level 直接内联
+- 同步 `onBlock`/`onEntity` 保留为 legacy，在 tick 线程上阻塞时打一次性警告
+- `workerPool()` 供 DataAccessor 默认异步方法回退
+
+**/data 全异步**
+- `DataAccessor` 新增 `getDataAsync` / `setDataAsync` 默认方法（worker 池回退）
+- `BlockDataAccessor` / `EntityDataAccessor` 直接走 `onBlockAsync` / `onEntityAsync`
+- `DataCommands` 全部终端处理器改为 CompletableFuture 链 + 回源反馈
+
+**/tag 全异步**
+- 逐实体 `onEntityAsync`，`allOf().whenComplete` 聚合 + `runOnSource` 回源
+
+**OCC 回滚链路彻底接通**
+- `PhaseSnapshot` 读集取值捕获：`readSetValues` + `recordRead(pos, state, tick)`
+- `Level.getBlockState()` 注入记录读到的状态值
+- `CommandBlock.verifyReadSetAndResume` 真实跨区校验读集 → 喂给 `PhaseValidator.validate` → RETRY 可达
+- 冲突时 `rollbackAndRetryExpChain` 恢复方块 + `retryExpChainPhase` 重放
+
+详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP5)。
 
 ## 架构概览
 
@@ -175,6 +199,7 @@ rm -f folia-server/build/cache/folia-paperclip.jar
 | EXP3 | OCC 乐观验证系统（含数据库理论溯源） | [v26.1.2-EXP3](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP3) |
 | **EXP4** | **完整实体 OCC 栈（ScoreLayer / EntityLayer / DeferredAction）** | [**v26.1.2-EXP4**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4) |
 | **EXP4Plus** | **跨区命令恢复（RegionCommandExecutor + /data /tag /trigger）** | [**v26.1.2-EXP4Plus**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP4Plus) |
+| **EXP5** | **非阻塞异步命令执行（/data /tag）+ OCC 回滚接通** | [**v26.1.2-EXP5**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP5) |
 
 ## 理论基础
 

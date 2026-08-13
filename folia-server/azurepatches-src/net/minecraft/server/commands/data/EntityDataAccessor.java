@@ -7,6 +7,7 @@ import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import com.mojang.logging.LogUtils;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import net.minecraft.advancements.criterion.NbtPredicate;
 import net.minecraft.commands.CommandSourceStack;
@@ -81,9 +82,30 @@ public class EntityDataAccessor implements DataAccessor {
     }
 
     @Override
+    public CompletableFuture<Void> setDataAsync(final CompoundTag tag) {
+        return net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(this.entity, (Entity scheduled) -> {
+            if (scheduled instanceof Player) {
+                throw ERROR_NO_PLAYERS.create();
+            }
+            UUID uuid = scheduled.getUUID();
+            try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(scheduled.problemPath(), LOGGER)) {
+                scheduled.load(TagValueInput.create(reporter, scheduled.registryAccess(), tag));
+                scheduled.setUUID(uuid);
+            }
+            return null;
+        });
+    }
+
+    @Override
     public CompoundTag getData() throws CommandSyntaxException {
         // AzureBranches: hop to the region owning this entity
         return net.minecraft.server.commands.RegionCommandExecutor.onEntity(this.entity, (Entity scheduled) ->
+            NbtPredicate.getEntityTagToCompare(scheduled));
+    }
+
+    @Override
+    public CompletableFuture<CompoundTag> getDataAsync() {
+        return net.minecraft.server.commands.RegionCommandExecutor.onEntityAsync(this.entity, (Entity scheduled) ->
             NbtPredicate.getEntityTagToCompare(scheduled));
     }
 

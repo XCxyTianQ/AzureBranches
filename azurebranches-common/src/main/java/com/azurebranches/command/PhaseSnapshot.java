@@ -111,6 +111,14 @@ public final class PhaseSnapshot {
     private final Map<Long, Long> readSet;
 
     /**
+     * EXP4Plus: The block state actually observed at each read position, captured
+     * at read time. This is what OCC validation compares against the live world to
+     * detect a non-repeatable read (an external write between our read and commit).
+     * Values are stored as java.lang.Object to keep this class Minecraft-free.
+     */
+    private final Map<Long, Object> readSetValues;
+
+    /**
      * EXP3: Pre-write block states for rollback. Before any putBlock(),
      * the old state is recorded here. If the Phase is rolled back, these
      * values are restored.
@@ -141,6 +149,7 @@ public final class PhaseSnapshot {
         this.blockCache = new HashMap<>();
         this.pendingWritePositions = new HashSet<>();
         this.readSet = new HashMap<>();
+        this.readSetValues = new HashMap<>();
         this.oldBlockStates = new HashMap<>();
         this.savepoints = new ArrayDeque<>();
         this.scoreCache = new HashMap<>();
@@ -204,10 +213,31 @@ public final class PhaseSnapshot {
     }
 
     /**
+     * EXP4Plus: Record a read together with the state observed at that moment.
+     * The observed state is the baseline for OCC read-set validation.
+     *
+     * @param pos   BlockPos.asLong()
+     * @param state the block state observed (may be null for air/removed)
+     * @param tick  current ServerLevel#getGameTime at read time
+     */
+    public void recordRead(final long pos, final Object state, final long tick) {
+        readSet.putIfAbsent(pos, tick);
+        readSetValues.putIfAbsent(pos, state);
+    }
+
+    /**
      * EXP3: Get the read set for validation and Continuation propagation.
      */
     public Map<Long, Long> getReadSet() {
         return readSet;
+    }
+
+    /**
+     * EXP4Plus: Positions -> the block state observed when they were read.
+     * Used by the EXP chain walker to verify the read set against the live world.
+     */
+    public Map<Long, Object> getReadSetValues() {
+        return readSetValues;
     }
 
     /** EXP3: Number of recorded cross-region reads in this Phase. */
@@ -554,6 +584,7 @@ public final class PhaseSnapshot {
         blockCache.clear();
         pendingWritePositions.clear();
         readSet.clear();
+        readSetValues.clear();
         savepoints.clear();
         scoreCache.clear();
         pendingScoreKeys.clear();

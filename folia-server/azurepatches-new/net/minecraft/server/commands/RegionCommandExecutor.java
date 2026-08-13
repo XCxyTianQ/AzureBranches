@@ -1,14 +1,20 @@
 package net.minecraft.server.commands;
 
+import ca.spottedleaf.moonrise.common.util.TickThread;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 
 /**
@@ -18,9 +24,17 @@ import net.minecraft.world.entity.Entity;
  * touch data owned by another region (e.g. /data, /tag, /trigger on a distant
  * entity or block) must hop to the owning region before touching that data.
  *
- * These helpers execute a task on the target region and block the caller
- * (the source region thread) until it completes, bounded by a timeout so a
- * deadlock between two regions can never hang the server permanently.
+ * EXP4Plus split this bridge into two families:
+ *
+ *  - <b>Async (preferred)</b>: {@code onBlockAsync}/{@code onEntityAsync} return
+ *    a {@link CompletableFuture} and never block. A tick (region) thread should
+ *    always use these and resume the command via a callback, because blocking a
+ *    tick thread stalls every entity/block/command owned by that region.
+ *
+ *  - <b>Blocking (legacy)</b>: {@code onBlock}/{@code onEntity} block the caller
+ *    up to 2s. These are only safe on a non-tick thread (worker/async/console).
+ *    They refuse to block a tick thread (fail fast) so the anti-pattern can never
+ *    silently stall a region again.
  *
  * The caller must pass only immutable/thread-safe values into the task;
  * Minecraft-internal objects of the target region must be captured inside
@@ -42,27 +56,41 @@ public final class RegionCommandExecutor {
         Component.literal("AzureBranches: cross-region command timed out")
     );
     private static final long TIMEOUT_MILLIS = 2000L;
+    private static final AtomicBoolean TICK_BLOCK_WARNED = new AtomicBoolean(false);
+
+    /** Bounded daemon pool for offloading synchronous data-access work off tick threads. */
+    private static final Executor WORKER_POOL = Executors.newFixedThreadPool(2, r -> {
+        final Thread t = new Thread(r, "AzureBranches-Data-Worker");
+        t.setDaemon(true);
+        return t;
+    });
 
     private RegionCommandExecutor() {}
 
-    /** Execute on the region owning the given block position. */
-    public static <T> T onBlock(final ServerLevel level, final BlockPos pos, final BlockTask<T> task) throws CommandSyntaxException {
-        return onBlockRegion(level, pos.getX() >> 4, pos.getZ() >> 4, task);
+    /** Worker pool for non-tick-thread blocking data access (used by DataAccessor defaults). */
+    public static Executor workerPool() {
+        return WORKER_POOL;
     }
 
-    /** Execute on the region owning the given chunk coordinates. */
-    public static <T> T onBlockRegion(final ServerLevel level, final int cx, final int cz, final BlockTask<T> task) throws CommandSyntaxException {
+    // ----------------------------------------------------------------
+    //  Async primitives (the optimal, non-blocking path)
+    // ----------------------------------------------------------------
+
+    /** Execute on the region owning the given block position, without blocking. */
+    public static <T> CompletableFuture<T> onBlockAsync(final ServerLevel level, final BlockPos pos, final BlockTask<T> task) {
+        return onBlockRegionAsync(level, pos.getX() >> 4, pos.getZ() >> 4, task);
+    }
+
+    /** Execute on the region owning the given chunk coordinates, without blocking. */
+    public static <T> CompletableFuture<T> onBlockRegionAsync(final ServerLevel level, final int cx, final int cz, final BlockTask<T> task) {
         final CompletableFuture<T> future = new CompletableFuture<>();
         io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
             .queueOrExecuteTickTask(level, cx, cz, () -> complete(future, task));
-        return await(future);
+        return future;
     }
 
-    /**
-     * Execute on the region owning the given entity. The task receives the
-     * scheduled entity reference, which is valid on the target thread.
-     */
-    public static <T> T onEntity(final Entity entity, final EntityTask<T> task) throws CommandSyntaxException {
+    /** Execute on the region owning the given entity, without blocking. */
+    public static <T> CompletableFuture<T> onEntityAsync(final Entity entity, final EntityTask<T> task) {
         final CompletableFuture<T> future = new CompletableFuture<>();
         entity.getBukkitEntity().taskScheduler.scheduleOrExecute((Entity scheduled) -> {
             try {
@@ -71,7 +99,48 @@ public final class RegionCommandExecutor {
                 future.completeExceptionally(t);
             }
         });
-        return await(future);
+        return future;
+    }
+
+    // ----------------------------------------------------------------
+    //  Blocking (legacy) variants — fail fast on a tick thread
+    // ----------------------------------------------------------------
+
+    public static <T> T onBlock(final ServerLevel level, final BlockPos pos, final BlockTask<T> task) throws CommandSyntaxException {
+        return await(onBlockAsync(level, pos, task));
+    }
+
+    public static <T> T onBlockRegion(final ServerLevel level, final int cx, final int cz, final BlockTask<T> task) throws CommandSyntaxException {
+        return await(onBlockRegionAsync(level, cx, cz, task));
+    }
+
+    public static <T> T onEntity(final Entity entity, final EntityTask<T> task) throws CommandSyntaxException {
+        return await(onEntityAsync(entity, task));
+    }
+
+    // ----------------------------------------------------------------
+    //  Thread context helpers
+    // ----------------------------------------------------------------
+
+    /** True when the calling thread is a Folia tick (region/global/shutdown) thread. */
+    public static boolean isTickThread() {
+        return TickThread.isTickThread();
+    }
+
+    /**
+     * Route a feedback callback (sendSuccess/sendFailure) back onto the source's
+     * owning region. Console sources have a null level and run inline.
+     */
+    public static void runOnSource(final CommandSourceStack source, final Runnable action) {
+        final ServerLevel level = source.getLevel();
+        if (level == null) {
+            action.run();
+            return;
+        }
+        final int cx = Mth.floor(source.getPosition().x) >> 4;
+        final int cz = Mth.floor(source.getPosition().z) >> 4;
+        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+            .queueOrExecuteTickTask(level, cx, cz, action);
     }
 
     private static <T> void complete(final CompletableFuture<T> future, final BlockTask<T> task) {
@@ -83,6 +152,18 @@ public final class RegionCommandExecutor {
     }
 
     private static <T> T await(final CompletableFuture<T> future) throws CommandSyntaxException {
+        if (TickThread.isTickThread()) {
+            // The optimal path is onBlockAsync/onEntityAsync. Some synchronous
+            // commands (notably /data) still block because their Brigadier
+            // interface returns a value synchronously; warn once so the
+            // anti-pattern is never silent, but keep them working.
+            if (TICK_BLOCK_WARNED.compareAndSet(false, true)) {
+                System.err.println(
+                    "[AzureBranches] WARNING: blocking a tick/region thread on cross-region work. "
+                    + "Prefer onBlockAsync/onEntityAsync + callback (see RegionCommandExecutor)."
+                );
+            }
+        }
         try {
             return future.get(TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
         } catch (final TimeoutException e) {
@@ -91,14 +172,19 @@ public final class RegionCommandExecutor {
             Thread.currentThread().interrupt();
             throw ERROR_TIMEOUT.create();
         } catch (final ExecutionException e) {
-            final Throwable cause = e.getCause();
-            if (cause instanceof CommandSyntaxException cse) {
-                throw cse;
-            }
-            if (cause instanceof RuntimeException re) {
-                throw re;
-            }
-            throw new RuntimeException(cause);
+            return unwrap(e);
         }
+    }
+
+    /** Re-throw the cause of a failed cross-region task, preserving command errors. */
+    public static <T> T unwrap(final ExecutionException e) throws CommandSyntaxException {
+        final Throwable cause = e.getCause();
+        if (cause instanceof CommandSyntaxException cse) {
+            throw cse;
+        }
+        if (cause instanceof RuntimeException re) {
+            throw re;
+        }
+        throw new RuntimeException(cause);
     }
 }
