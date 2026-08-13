@@ -577,6 +577,47 @@ tasks.register("buildFolia") {
                     "            return result;\n" +
                     "        }"
             )
+
+            // EXP5 P1: fix Folia's broken reload executor so /reload and /datapack
+            // can be restored. Folia removed the server-thread Executor (execute()
+            // throws UnsupportedOperationException), but reloadResources still passes
+            // `this` as the Executor and mutates global state on a non-main thread.
+            val serverFile = File(minecraftSrc, "net/minecraft/server/MinecraftServer.java")
+            transformSource(serverFile, "MinecraftServer.java (EXP5 P1 reload executor)",
+                "                    .collect(ImmutableList.toImmutableList()),\n" +
+                    "                this\n" +
+                    "            )" to
+                    "                    .collect(ImmutableList.toImmutableList()),\n" +
+                    "                this.executor\n" +
+                    "            )",
+
+                "            .thenAcceptAsync(newResources -> {" to
+                    "            .thenCompose(newResources -> this.runOnGlobalTick(() -> {",
+
+                "            }, this);\n" +
+                    "        if (this.isSameThread()) {" to
+                    "            }));\n" +
+                    "        if (this.isSameThread()) {",
+
+                "    public static WorldDataConfiguration configurePackRepository(" to
+                    "    // AzureBranches EXP5 P1: run a task on the global tick thread and\n" +
+                    "    // expose it as a CompletableFuture, so reloadResources applies global\n" +
+                    "    // state changes on the main thread (Folia removed the server executor).\n" +
+                    "    private CompletableFuture<Void> runOnGlobalTick(final Runnable task) {\n" +
+                    "        final CompletableFuture<Void> future = new CompletableFuture<>();\n" +
+                    "        io.papermc.paper.threadedregions.RegionizedServer.getInstance().addTask(() -> {\n" +
+                    "            try {\n" +
+                    "                task.run();\n" +
+                    "                future.complete(null);\n" +
+                    "            } catch (final Throwable t) {\n" +
+                    "                future.completeExceptionally(t);\n" +
+                    "            }\n" +
+                    "        });\n" +
+                    "        return future;\n" +
+                    "    }\n" +
+                    "\n" +
+                    "    public static WorldDataConfiguration configurePackRepository("
+            )
         }
 
         // AzureBranches: overlay modified/added Minecraft sources after
