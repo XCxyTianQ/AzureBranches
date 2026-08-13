@@ -200,26 +200,34 @@ public class CloneCommands {
                     new BlockPos(Math.min(from.minX(), destination.minX()), Math.min(from.minY(), destination.minY()), Math.min(from.minZ(), destination.minZ())),
                     new BlockPos(Math.max(from.maxX(), destination.maxX()), Math.max(from.maxY(), destination.maxY()), Math.max(from.maxZ(), destination.maxZ()))
                 );
-                java.util.function.Consumer<java.util.List<net.minecraft.world.level.chunk.ChunkAccess>> runClone = chunks ->
-                    doClone(source, fromDimension, toDimension, from, destination, predicate, mode, strict);
                 if (fromDimension == toDimension) {
                     fromDimension.moonrise$loadChunksAsync(
                         (loadRegion.minX() - buffer) >> 4, (loadRegion.maxX() + buffer) >> 4,
                         (loadRegion.minZ() - buffer) >> 4, (loadRegion.maxZ() + buffer) >> 4,
                         net.minecraft.world.level.chunk.status.ChunkStatus.FULL, ca.spottedleaf.concurrentutil.util.Priority.NORMAL,
-                        runClone
+                        chunks -> doCloneSame(source, fromDimension, from, destination, predicate, mode, strict)
                     );
                 } else {
                     fromDimension.moonrise$loadChunksAsync(
                         (from.minX() - buffer) >> 4, (from.maxX() + buffer) >> 4,
                         (from.minZ() - buffer) >> 4, (from.maxZ() + buffer) >> 4,
                         net.minecraft.world.level.chunk.status.ChunkStatus.FULL, ca.spottedleaf.concurrentutil.util.Priority.NORMAL,
-                        srcChunks -> toDimension.moonrise$loadChunksAsync(
-                            (destination.minX() - buffer) >> 4, (destination.maxX() + buffer) >> 4,
-                            (destination.minZ() - buffer) >> 4, (destination.maxZ() + buffer) >> 4,
-                            net.minecraft.world.level.chunk.status.ChunkStatus.FULL, ca.spottedleaf.concurrentutil.util.Priority.NORMAL,
-                            runClone
-                        )
+                        srcChunks -> {
+                            try {
+                                CloneCommands.CloneData data = readSource(source, fromDimension, from, destination, predicate);
+                                if (mode == CloneCommands.Mode.MOVE) {
+                                    clearSource(data.clearBlocksList, fromDimension, strict);
+                                }
+                                toDimension.moonrise$loadChunksAsync(
+                                    (destination.minX() - buffer) >> 4, (destination.maxX() + buffer) >> 4,
+                                    (destination.minZ() - buffer) >> 4, (destination.maxZ() + buffer) >> 4,
+                                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL, ca.spottedleaf.concurrentutil.util.Priority.NORMAL,
+                                    dstChunks -> finishCloneWrite(source, fromDimension, toDimension, from, data, mode, strict)
+                                );
+                            } catch (CommandSyntaxException ex) {
+                                source.sendFailure((Component) ex.getRawMessage());
+                            }
+                        }
                     );
                 }
                 return 0; // Folia - region threading
@@ -228,10 +236,9 @@ public class CloneCommands {
     }
 
     // Folia start - region threading
-    private static void doClone(
+    private static void doCloneSame(
         final CommandSourceStack source,
-        final ServerLevel fromDimension,
-        final ServerLevel toDimension,
+        final ServerLevel level,
         final BoundingBox from,
         final BoundingBox destination,
         final Predicate<BlockInWorld> predicate,
@@ -239,38 +246,58 @@ public class CloneCommands {
         final boolean strict
     ) {
         try {
-            int count = cloneBlocks(source, fromDimension, toDimension, from, destination, predicate, mode, strict);
-            if (count == 0) {
-                source.sendFailure(Component.translatable("commands.clone.failed"));
-            } else {
-                int finalCount = count;
-                source.sendSuccess(() -> Component.translatable("commands.clone.success", finalCount), true);
+            CloneCommands.CloneData data = readSource(source, level, from, destination, predicate);
+            if (mode == CloneCommands.Mode.MOVE) {
+                clearSource(data.clearBlocksList, level, strict);
             }
+            int count = writeDestination(source, level, level, from, data, strict);
+            reportCloneResult(source, count);
         } catch (CommandSyntaxException ex) {
             source.sendFailure((Component) ex.getRawMessage());
         }
     }
 
-    private static int cloneBlocks(
+    private static void finishCloneWrite(
         final CommandSourceStack source,
         final ServerLevel fromDimension,
         final ServerLevel toDimension,
         final BoundingBox from,
-        final BoundingBox destination,
-        final Predicate<BlockInWorld> predicate,
+        final CloneCommands.CloneData data,
         final CloneCommands.Mode mode,
         final boolean strict
+    ) {
+        try {
+            int count = writeDestination(source, fromDimension, toDimension, from, data, strict);
+            reportCloneResult(source, count);
+        } catch (CommandSyntaxException ex) {
+            source.sendFailure((Component) ex.getRawMessage());
+        }
+    }
+
+    private static void reportCloneResult(final CommandSourceStack source, final int count) {
+        if (count == 0) {
+            source.sendFailure(Component.translatable("commands.clone.failed"));
+        } else {
+            int finalCount = count;
+            source.sendSuccess(() -> Component.translatable("commands.clone.success", finalCount), true);
+        }
+    }
+
+    private static CloneCommands.CloneData readSource(
+        final CommandSourceStack source,
+        final ServerLevel fromDimension,
+        final BoundingBox from,
+        final BoundingBox destination,
+        final Predicate<BlockInWorld> predicate
     ) throws CommandSyntaxException {
         List<CloneCommands.CloneBlockInfo> solidList = Lists.newArrayList();
         List<CloneCommands.CloneBlockInfo> blockEntitiesList = Lists.newArrayList();
         List<CloneCommands.CloneBlockInfo> otherBlocksList = Lists.newArrayList();
         Deque<BlockPos> clearBlocksList = Lists.newLinkedList();
-        int count = 0;
         ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER);
+        BlockPos offset = new BlockPos(destination.minX() - from.minX(), destination.minY() - from.minY(), destination.minZ() - from.minZ());
 
         try {
-            BlockPos offset = new BlockPos(destination.minX() - from.minX(), destination.minY() - from.minY(), destination.minZ() - from.minZ());
-
             for (int z = from.minZ(); z <= from.maxZ(); z++) {
                 for (int y = from.minY(); y <= from.maxY(); y++) {
                     for (int x = from.minX(); x <= from.maxX(); x++) {
@@ -289,46 +316,72 @@ public class CloneCommands {
                                     output.buildResult(), blockEntity.components()
                                 );
                                 blockEntitiesList.add(
-                                    new CloneCommands.CloneBlockInfo(
-                                        destinationPos, blockState, blockEntityInfo, toDimension.getBlockState(destinationPos)
-                                    )
+                                    new CloneCommands.CloneBlockInfo(destinationPos, blockState, blockEntityInfo)
                                 );
                                 clearBlocksList.addLast(sourcePos);
                             } else if (!blockState.isSolidRender() && !blockState.isCollisionShapeFullBlock(fromDimension, sourcePos)) {
-                                otherBlocksList.add(
-                                    new CloneCommands.CloneBlockInfo(destinationPos, blockState, null, toDimension.getBlockState(destinationPos))
-                                );
+                                otherBlocksList.add(new CloneCommands.CloneBlockInfo(destinationPos, blockState, null));
                                 clearBlocksList.addFirst(sourcePos);
                             } else {
-                                solidList.add(
-                                    new CloneCommands.CloneBlockInfo(destinationPos, blockState, null, toDimension.getBlockState(destinationPos))
-                                );
+                                solidList.add(new CloneCommands.CloneBlockInfo(destinationPos, blockState, null));
                                 clearBlocksList.addLast(sourcePos);
                             }
                         }
                     }
                 }
             }
-
-            int defaultUpdateFlags = 2 | (strict ? 816 : 0);
-            if (mode == CloneCommands.Mode.MOVE) {
-                for (BlockPos pos : clearBlocksList) {
-                    fromDimension.setBlock(pos, Blocks.BARRIER.defaultBlockState(), defaultUpdateFlags | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
-                }
-
-                int standardUpdateFlags = strict ? defaultUpdateFlags : Block.UPDATE_ALL;
-
-                for (BlockPos pos : clearBlocksList) {
-                    fromDimension.setBlock(pos, Blocks.AIR.defaultBlockState(), standardUpdateFlags);
-                }
+        } catch (Throwable var36) {
+            try {
+                reporter.close();
+            } catch (Throwable var35) {
+                var36.addSuppressed(var35);
             }
 
-            List<CloneCommands.CloneBlockInfo> blockInfoList = Lists.newArrayList();
-            blockInfoList.addAll(solidList);
-            blockInfoList.addAll(blockEntitiesList);
-            blockInfoList.addAll(otherBlocksList);
-            List<CloneCommands.CloneBlockInfo> reverse = Lists.reverse(blockInfoList);
+            throw var36;
+        }
 
+        reporter.close();
+        return new CloneCommands.CloneData(solidList, blockEntitiesList, otherBlocksList, clearBlocksList, offset);
+    }
+
+    private static void clearSource(final Deque<BlockPos> clearBlocksList, final ServerLevel fromDimension, final boolean strict) {
+        int defaultUpdateFlags = 2 | (strict ? 816 : 0);
+        for (BlockPos pos : clearBlocksList) {
+            fromDimension.setBlock(pos, Blocks.BARRIER.defaultBlockState(), defaultUpdateFlags | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+        }
+
+        int standardUpdateFlags = strict ? defaultUpdateFlags : Block.UPDATE_ALL;
+        for (BlockPos pos : clearBlocksList) {
+            fromDimension.setBlock(pos, Blocks.AIR.defaultBlockState(), standardUpdateFlags);
+        }
+    }
+
+    private static int writeDestination(
+        final CommandSourceStack source,
+        final ServerLevel fromDimension,
+        final ServerLevel toDimension,
+        final BoundingBox from,
+        final CloneCommands.CloneData data,
+        final boolean strict
+    ) throws CommandSyntaxException {
+        int count = 0;
+        ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER);
+
+        List<CloneCommands.CloneBlockInfo> blockInfoList = Lists.newArrayList();
+        blockInfoList.addAll(data.solidList);
+        blockInfoList.addAll(data.blockEntitiesList);
+        blockInfoList.addAll(data.otherBlocksList);
+        List<CloneCommands.CloneBlockInfo> reverse = Lists.reverse(blockInfoList);
+
+        int defaultUpdateFlags = 2 | (strict ? 816 : 0);
+        java.util.Map<BlockPos, BlockState> previousStates = new java.util.HashMap<>();
+        if (!strict) {
+            for (CloneCommands.CloneBlockInfo cloneInfo : reverse) {
+                previousStates.put(cloneInfo.pos, toDimension.getBlockState(cloneInfo.pos));
+            }
+        }
+
+        try {
             for (CloneCommands.CloneBlockInfo cloneInfo : reverse) {
                 toDimension.setBlock(cloneInfo.pos, Blocks.BARRIER.defaultBlockState(), defaultUpdateFlags | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
             }
@@ -339,7 +392,7 @@ public class CloneCommands {
                 }
             }
 
-            for (CloneCommands.CloneBlockInfo cloneInfox : blockEntitiesList) {
+            for (CloneCommands.CloneBlockInfo cloneInfox : data.blockEntitiesList) {
                 BlockEntity newBlockEntity = toDimension.getBlockEntity(cloneInfox.pos);
                 if (cloneInfox.blockEntityInfo != null && newBlockEntity != null) {
                     newBlockEntity.loadCustomOnly(
@@ -356,11 +409,11 @@ public class CloneCommands {
 
             if (!strict) {
                 for (CloneCommands.CloneBlockInfo cloneInfox : reverse) {
-                    toDimension.updateNeighboursOnBlockSet(cloneInfox.pos, cloneInfox.previousStateAtDestination);
+                    toDimension.updateNeighboursOnBlockSet(cloneInfox.pos, previousStates.get(cloneInfox.pos));
                 }
             }
 
-            toDimension.getBlockTicks().copyAreaFrom(fromDimension.getBlockTicks(), from, offset);
+            toDimension.getBlockTicks().copyAreaFrom(fromDimension.getBlockTicks(), from, data.offset);
         } catch (Throwable var36) {
             try {
                 reporter.close();
@@ -376,11 +429,20 @@ public class CloneCommands {
     }
     // Folia end - region threading
 
+    private record CloneData(
+        List<CloneCommands.CloneBlockInfo> solidList,
+        List<CloneCommands.CloneBlockInfo> blockEntitiesList,
+        List<CloneCommands.CloneBlockInfo> otherBlocksList,
+        Deque<BlockPos> clearBlocksList,
+        BlockPos offset
+    ) {
+    }
+
     private record CloneBlockEntityInfo(CompoundTag tag, DataComponentMap components) {
     }
 
     private record CloneBlockInfo(
-        BlockPos pos, BlockState state, CloneCommands.@Nullable CloneBlockEntityInfo blockEntityInfo, BlockState previousStateAtDestination
+        BlockPos pos, BlockState state, CloneCommands.@Nullable CloneBlockEntityInfo blockEntityInfo
     ) {
     }
 
