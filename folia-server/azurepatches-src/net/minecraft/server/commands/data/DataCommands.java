@@ -353,7 +353,27 @@ public class DataCommands {
         final DataAccessor target = targetProvider.access(context);
         final NbtPathArgument.NbtPath targetPath = NbtPathArgument.getPath(context, "targetPath");
         final CommandSourceStack sourceStack = context.getSource();
-        source.thenCompose(src -> target.getDataAsync().thenCompose(targetData -> {
+        final CompletableFuture<CompoundTag> targetDataFuture = target.getDataAsync();
+
+        // EXP5 P0#3: same-region fast path — exact synchronous result when both
+        // the source read and the target read complete synchronously.
+        if (source.isDone() && targetDataFuture.isDone()) {
+            try {
+                final CompoundTag targetSnapshot = targetDataFuture.join();
+                final int result = manipulator.modify(context, targetSnapshot, targetPath, source.join());
+                if (result == 0) {
+                    throw ERROR_MERGE_UNCHANGED.create();
+                }
+                target.setData(targetSnapshot);
+                sourceStack.sendSuccess(() -> target.getModifiedSuccess(), true);
+                return result;
+            } catch (CompletionException | CommandSyntaxException e) {
+                sourceStack.sendFailure(errorComponent(e));
+                return 0;
+            }
+        }
+
+        source.thenCompose(src -> targetDataFuture.thenCompose(targetData -> {
             final int result;
             try {
                 result = manipulator.modify(context, targetData, targetPath, src);
@@ -375,7 +395,26 @@ public class DataCommands {
     }
 
     private static int removeData(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path) {
-        accessor.getDataAsync().thenCompose(result -> {
+        final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+
+        // EXP5 P0#3: same-region fast path.
+        if (data.isDone()) {
+            try {
+                final CompoundTag result = data.join();
+                final int count = path.remove(result);
+                if (count == 0) {
+                    throw ERROR_MERGE_UNCHANGED.create();
+                }
+                accessor.setData(result);
+                source.sendSuccess(() -> accessor.getModifiedSuccess(), true);
+                return count;
+            } catch (CompletionException | CommandSyntaxException e) {
+                source.sendFailure(errorComponent(e));
+                return 0;
+            }
+        }
+
+        data.thenCompose(result -> {
             final int count;
             try {
                 count = path.remove(result);
@@ -412,18 +451,40 @@ public class DataCommands {
     }
 
     private static int getData(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path) {
-        accessor.getDataAsync().whenComplete((data, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
+        final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+
+        // EXP5 P0#3: same-region fast path — exact value for /execute store etc.
+        if (data.isDone()) {
+            try {
+                final Tag tag = getSingleTag(path, data.join());
+                final int result = switch (tag) {
+                    case NumericTag numericTag -> Mth.floor(numericTag.doubleValue());
+                    case CollectionTag collectionTag -> collectionTag.size();
+                    case CompoundTag compoundTag -> compoundTag.size();
+                    case StringTag(String s) -> s.length();
+                    case EndTag ignored -> throw ERROR_GET_NON_EXISTENT.create(path.toString());
+                    default -> throw new MatchException(null, null);
+                };
+                source.sendSuccess(() -> accessor.getPrintSuccess(tag), false);
+                return result;
+            } catch (CompletionException | CommandSyntaxException e) {
+                source.sendFailure(errorComponent(e));
+                return 0;
+            }
+        }
+
+        data.whenComplete((d, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
             if (ex != null) {
                 source.sendFailure(errorComponent(ex));
                 return;
             }
             try {
-                Tag tag = getSingleTag(path, data);
+                Tag tag = getSingleTag(path, d);
                 int result = switch (tag) {
                     case NumericTag numericTag -> Mth.floor(numericTag.doubleValue());
                     case CollectionTag collectionTag -> collectionTag.size();
                     case CompoundTag compoundTag -> compoundTag.size();
-                    case StringTag(String var14) -> var14.length();
+                    case StringTag(String s) -> s.length();
                     case EndTag ignored -> throw ERROR_GET_NON_EXISTENT.create(path.toString());
                     default -> throw new MatchException(null, null);
                 };
@@ -436,13 +497,31 @@ public class DataCommands {
     }
 
     private static int getNumeric(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path, final double scale) {
-        accessor.getDataAsync().whenComplete((data, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
+        final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+
+        // EXP5 P0#3: same-region fast path.
+        if (data.isDone()) {
+            try {
+                final Tag tag = getSingleTag(path, data.join());
+                if (!(tag instanceof NumericTag)) {
+                    throw ERROR_GET_NOT_NUMBER.create(path.toString());
+                }
+                final int result = Mth.floor(((NumericTag) tag).doubleValue() * scale);
+                source.sendSuccess(() -> accessor.getPrintSuccess(path, scale, result), false);
+                return result;
+            } catch (CompletionException | CommandSyntaxException e) {
+                source.sendFailure(errorComponent(e));
+                return 0;
+            }
+        }
+
+        data.whenComplete((d, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
             if (ex != null) {
                 source.sendFailure(errorComponent(ex));
                 return;
             }
             try {
-                Tag tag = getSingleTag(path, data);
+                Tag tag = getSingleTag(path, d);
                 if (!(tag instanceof NumericTag)) {
                     throw ERROR_GET_NOT_NUMBER.create(path.toString());
                 }
@@ -456,18 +535,54 @@ public class DataCommands {
     }
 
     private static int getData(final CommandSourceStack source, final DataAccessor accessor) {
-        accessor.getDataAsync().whenComplete((data, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
+        final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+
+        // EXP5 P0#3: same-region fast path.
+        if (data.isDone()) {
+            try {
+                final CompoundTag d = data.join();
+                source.sendSuccess(() -> accessor.getPrintSuccess(d), false);
+                return 1;
+            } catch (CompletionException e) {
+                source.sendFailure(errorComponent(e));
+                return 0;
+            }
+        }
+
+        data.whenComplete((d, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
             if (ex != null) {
                 source.sendFailure(errorComponent(ex));
             } else {
-                source.sendSuccess(() -> accessor.getPrintSuccess(data), false);
+                source.sendSuccess(() -> accessor.getPrintSuccess(d), false);
             }
         }));
         return 1;
     }
 
     private static int mergeData(final CommandSourceStack source, final DataAccessor accessor, final CompoundTag nbt) {
-        accessor.getDataAsync().thenCompose(old -> {
+        final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+
+        // EXP5 P0#3: same-region fast path.
+        if (data.isDone()) {
+            try {
+                final CompoundTag old = data.join();
+                if (NbtPathArgument.NbtPath.isTooDeep(nbt, 0)) {
+                    throw NbtPathArgument.ERROR_DATA_TOO_DEEP.create();
+                }
+                final CompoundTag result = old.copy().merge(nbt);
+                if (old.equals(result)) {
+                    throw ERROR_MERGE_UNCHANGED.create();
+                }
+                accessor.setData(result);
+                source.sendSuccess(() -> accessor.getModifiedSuccess(), true);
+                return 1;
+            } catch (CompletionException | CommandSyntaxException e) {
+                source.sendFailure(errorComponent(e));
+                return 0;
+            }
+        }
+
+        data.thenCompose(old -> {
             try {
                 if (NbtPathArgument.NbtPath.isTooDeep(nbt, 0)) {
                     throw NbtPathArgument.ERROR_DATA_TOO_DEEP.create();

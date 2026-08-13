@@ -261,6 +261,28 @@ tasks.register("buildFolia") {
         final com.azurebranches.command.Continuation cont,
         final com.azurebranches.command.PhaseSnapshot phaseSnap) {
 
+        // EXP5 P0#2: compensate scoreboard and entity-NBT writes before restoring
+        // blocks and replaying, so the replay does not double-apply them. The
+        // compensate methods are best-effort and log failures internally.
+        try {
+            com.azurebranches.command.ScoreLayer.compensate(phaseSnap,
+                (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
+                    net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                    level.getScoreboard().getObjective(objective)).get(),
+                (objective, holder, value) -> level.getScoreboard().getOrCreatePlayerScore(
+                    net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                    level.getScoreboard().getObjective(objective)).set(value));
+        } catch (final Throwable t) {
+            System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
+        }
+        try {
+            com.azurebranches.command.EntityLayer.compensate(phaseSnap,
+                (entityId, path) -> readEntityNbtPath(level, entityId, path),
+                (entityId, path, value) -> writeEntityNbtPath(level, entityId, path, value));
+        } catch (final Throwable t) {
+            System.err.println("[AzureBranches] entity-NBT compensation wiring failed: " + t.getMessage());
+        }
+
         final java.util.Map<Long, Object> oldStates = phaseSnap.getOldBlockStates();
         if (oldStates == null || oldStates.isEmpty()) {
             // Nothing to roll back — retry immediately from the Phase start
@@ -344,6 +366,97 @@ tasks.register("buildFolia") {
             cont.remaining + cont.stepCount, phaseSnap);
     }
 
+    // EXP5 P0#2: entity-NBT path read/write helpers for EntityLayer compensation.
+    private static Object readEntityNbtPath(final ServerLevel level, final int entityId, final String path) {
+        final net.minecraft.world.entity.Entity entity = level.getEntity(entityId);
+        if (entity == null) {
+            return null;
+        }
+        final net.minecraft.nbt.CompoundTag tag =
+            net.minecraft.advancements.criterion.NbtPredicate.getEntityTagToCompare(entity);
+        final int bracket = path.indexOf('[');
+        final String name = bracket >= 0 ? path.substring(0, bracket) : path;
+        final net.minecraft.nbt.Tag value;
+        if (bracket >= 0) {
+            final int close = path.indexOf(']', bracket);
+            final int idx = Integer.parseInt(path.substring(bracket + 1, close));
+            final net.minecraft.nbt.Tag listTag = tag.get(name);
+            value = (listTag instanceof net.minecraft.nbt.ListTag list) ? list.get(idx) : null;
+        } else {
+            value = tag.get(name);
+        }
+        if (value instanceof net.minecraft.nbt.NumericTag num) {
+            return num.box();
+        }
+        if (value instanceof net.minecraft.nbt.StringTag str) {
+            return str.asString().orElse(null);
+        }
+        return value;
+    }
+
+    private static void writeEntityNbtPath(final ServerLevel level, final int entityId, final String path, final Object value) {
+        final net.minecraft.world.entity.Entity entity = level.getEntity(entityId);
+        if (entity == null) {
+            return;
+        }
+        final net.minecraft.nbt.CompoundTag tag =
+            net.minecraft.advancements.criterion.NbtPredicate.getEntityTagToCompare(entity);
+        final net.minecraft.nbt.Tag converted = toNbtTag(value);
+        final int bracket = path.indexOf('[');
+        final String name = bracket >= 0 ? path.substring(0, bracket) : path;
+        if (bracket >= 0) {
+            final int close = path.indexOf(']', bracket);
+            final int idx = Integer.parseInt(path.substring(bracket + 1, close));
+            final net.minecraft.nbt.Tag listTag = tag.get(name);
+            if (listTag instanceof net.minecraft.nbt.ListTag list) {
+                list.set(idx, converted);
+            }
+        } else {
+            tag.put(name, converted);
+        }
+        try (net.minecraft.util.ProblemReporter.ScopedCollector reporter =
+                 new net.minecraft.util.ProblemReporter.ScopedCollector(entity.problemPath(), com.mojang.logging.LogUtils.getLogger())) {
+            entity.load(net.minecraft.world.level.storage.TagValueInput.create(reporter, entity.registryAccess(), tag));
+        }
+    }
+
+    private static net.minecraft.nbt.Tag toNbtTag(final Object value) {
+        if (value instanceof Number num) {
+            if (value instanceof Double || value instanceof Float) {
+                return net.minecraft.nbt.DoubleTag.valueOf(num.doubleValue());
+            }
+            return net.minecraft.nbt.IntTag.valueOf(num.intValue());
+        }
+        if (value instanceof String s) {
+            return net.minecraft.nbt.StringTag.valueOf(s);
+        }
+        return (value instanceof net.minecraft.nbt.Tag t) ? t : net.minecraft.nbt.StringTag.valueOf(String.valueOf(value));
+    }
+
+    // EXP5 P0#2: execute deferred entity-lifecycle actions at Phase commit.
+    private static void commitDeferredActions(final ServerLevel level, final com.azurebranches.command.PhaseSnapshot phaseSnap) {
+        if (!phaseSnap.hasDeferredActions()) {
+            return;
+        }
+        for (final com.azurebranches.command.DeferredAction action : phaseSnap.getDeferredActions()) {
+            if (action.type == com.azurebranches.command.DeferredAction.ActionType.KILL
+                || action.type == com.azurebranches.command.DeferredAction.ActionType.TP) {
+                final net.minecraft.world.entity.Entity entity = level.getEntity(action.entityId);
+                if (entity != null) {
+                    entity.getBukkitEntity().taskScheduler.scheduleOrExecute((net.minecraft.world.entity.Entity scheduled) -> {
+                        if (action.type == com.azurebranches.command.DeferredAction.ActionType.KILL) {
+                            scheduled.kill(level);
+                        } else {
+                            scheduled.teleportTo(action.tpX(), action.tpY(), action.tpZ());
+                        }
+                    });
+                }
+            }
+            // SUMMON requires EntityType + the PhaseSnapshot NBT cache; not yet wired.
+        }
+        phaseSnap.clearDeferredActions();
+    }
+
     // EXP4Plus: verify the Phase read-set against the live world on each
     // owning region, then commit or rollback + replay. This replaces the
     // previous empty-read-set validate() call, so an external write to a
@@ -356,6 +469,7 @@ tasks.register("buildFolia") {
         final com.azurebranches.command.PhaseSnapshot phaseSnap) {
 
         if (!com.azurebranches.command.PhaseValidator.isEnabled()) {
+            commitDeferredActions(level, phaseSnap);
             walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
             return;
         }
@@ -363,6 +477,7 @@ tasks.register("buildFolia") {
         final java.util.Map<Long, Object> readValues = phaseSnap.getReadSetValues();
         if (readValues == null || readValues.isEmpty()) {
             com.azurebranches.command.ExpChainSupport.onValidationPassed();
+            commitDeferredActions(level, phaseSnap);
             walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
             return;
         }
@@ -400,6 +515,7 @@ tasks.register("buildFolia") {
                         switch (result) {
                             case COMMIT -> {
                                 com.azurebranches.command.ExpChainSupport.onValidationPassed();
+                                commitDeferredActions(level, phaseSnap);
                                 walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
                             }
                             case RETRY -> {
@@ -410,10 +526,13 @@ tasks.register("buildFolia") {
                             }
                             case RETRY_EXHAUSTED -> {
                                 com.azurebranches.command.ExpChainSupport.onValidationExhausted();
+                                commitDeferredActions(level, phaseSnap);
                                 walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
                             }
-                            case READ_SET_OVERFLOW ->
+                            case READ_SET_OVERFLOW -> {
+                                commitDeferredActions(level, phaseSnap);
                                 walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
+                            }
                         }
                     }));
     }
