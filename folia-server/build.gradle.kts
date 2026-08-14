@@ -703,7 +703,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP5.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP5Plus.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

@@ -122,6 +122,21 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP5)。
 
+### EXP5Plus — /scoreboard 全局 tick 恢复（当前版本）
+
+**RegionCommandExecutor 全局 tick 桥**
+- 新增 `onGlobalAsync` / `onGlobal` 原语：服务器全局数据（积分板等）只能在全局 tick 线程上访问，跨线程调用排队到 `RegionizedServer.addTask`，已在全局线程时（控制台命令）内联执行形成同源快路径
+
+**/scoreboard 恢复**
+- Folia 在注册层禁用了该命令（`Commands.java` 注释），现重新注册
+- `ScoreboardCommand` 覆盖层：全部终端处理器（含 ObjectiveArgument / ScoreHolderArgument 的参数解析）整体派发到全局 tick 线程执行
+- 反馈经 `runOnSource` 路由回源 Region；控制台 null-level 直接内联
+- 实体型积分板持有者（`@e` 选择器、玩家名）的反馈显示名经 `onEntityAsync` 在实体所属 Region 捕获（同 /tag 模式），错误消息使用不可变的 scoreboard name 避免跨线程解引用
+- 建议提供器（suggestTriggers 等）保留只读直查，与 /trigger 同等的 best-effort 语义
+- 异步路径返回乐观占位值 1，快路径（控制台）返回精确结果，与 /data 语义一致
+
+详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP5Plus)。
+
 ## 架构概览
 
 ```

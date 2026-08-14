@@ -240,7 +240,7 @@ public class Commands {
         RotateCommand.register(this.dispatcher);
         SayCommand.register(this.dispatcher);
         //ScheduleCommand.register(this.dispatcher); // Folia - region threading
-        //ScoreboardCommand.register(this.dispatcher, context); // Folia - region threading
+        ScoreboardCommand.register(this.dispatcher, context); // AzureBranches: restored - scoreboard on global tick
         SeedCommand.register(this.dispatcher, commandSelection != Commands.CommandSelection.INTEGRATED);
         VersionCommand.register(this.dispatcher, commandSelection != Commands.CommandSelection.INTEGRATED);
         SetBlockCommand.register(this.dispatcher, context);

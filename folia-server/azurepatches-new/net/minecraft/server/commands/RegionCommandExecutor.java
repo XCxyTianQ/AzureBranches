@@ -103,6 +103,40 @@ public final class RegionCommandExecutor {
     }
 
     // ----------------------------------------------------------------
+    //  Global tick primitives — for server-global data (e.g. scoreboard)
+    // ----------------------------------------------------------------
+
+    /**
+     * Execute on the Folia global tick thread, without blocking the caller.
+     *
+     * <p>Server-global state (scoreboard, registries, gamerules...) is only
+     * safe to touch on the global tick thread. Commands that mutate such state
+     * (e.g. {@code /scoreboard}) dispatch their work through this primitive and
+     * route feedback back via {@link #runOnSource}. When the calling thread IS
+     * the global tick thread (console commands), the task runs inline and the
+     * returned future is already completed — the same-region fast path.</p>
+     */
+    public static <T> CompletableFuture<T> onGlobalAsync(final BlockTask<T> task) {
+        if (io.papermc.paper.threadedregions.RegionizedServer.isGlobalTickThread()) {
+            final CompletableFuture<T> future = new CompletableFuture<>();
+            complete(future, task);
+            return future;
+        }
+        final CompletableFuture<T> future = new CompletableFuture<>();
+        io.papermc.paper.threadedregions.RegionizedServer.getInstance().addTask(() -> complete(future, task));
+        return future;
+    }
+
+    /**
+     * Blocking legacy variant of {@link #onGlobalAsync}: waits up to 2s for the
+     * global tick thread to run the task. Only safe on a non-tick thread; on a
+     * tick thread it warns once (see {@link #await}) but keeps working.
+     */
+    public static <T> T onGlobal(final BlockTask<T> task) throws CommandSyntaxException {
+        return await(onGlobalAsync(task));
+    }
+
+    // ----------------------------------------------------------------
     //  Blocking (legacy) variants — fail fast on a tick thread
     // ----------------------------------------------------------------
 
