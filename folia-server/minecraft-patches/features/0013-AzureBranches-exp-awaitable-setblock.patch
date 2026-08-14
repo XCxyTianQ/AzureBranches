@@ -1,27 +1,285 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: AzureBranches <azurebranches@local>
-Date: Thu, 17 Jul 2026 10:10:00 +0800
-Subject: [PATCH] AzureBranches - EXP awaitable /setblock v2 (registerDeferred)
-
-Changes from v1:
-  - Uses registerDeferred instead of manual registerRemote + queueOrExecuteTickTask.
-  - Same-region setblocks execute synchronously (fast path inside registerDeferred).
-  - Cross-region setblocks are registered for batch dispatch by the chain Walker.
-  - Error messages (CommandSyntaxException) are sent to source before rethrowing.
-  - The non-EXP path (ACCESS / player command / vanilla) is completely unchanged.
-
----
- .../server/commands/SetBlockCommand.java      | 57 +++++++++++++++++++
- 1 file changed, 57 insertions(+)
-
+Date: Fri, 14 Aug 2026 22:00:00 +0800
+Subject: [PATCH] AzureBranches - EXP awaitable /setblock v2 + Phase-Based write-through (registerDeferred)
 diff --git a/net/minecraft/server/commands/SetBlockCommand.java b/net/minecraft/server/commands/SetBlockCommand.java
-index 582d977..9c0e8f7 100644
+index 582d977..aaf27bf 100644
 --- a/net/minecraft/server/commands/SetBlockCommand.java
 +++ b/net/minecraft/server/commands/SetBlockCommand.java
-@@ -112,6 +112,76 @@ public class SetBlockCommand {
-         final boolean strict
-     ) throws CommandSyntaxException {
-         ServerLevel level = source.getLevel();
+@@ -1,159 +1,244 @@
+-package net.minecraft.server.commands;
+-
+-import com.mojang.brigadier.CommandDispatcher;
+-import com.mojang.brigadier.exceptions.CommandSyntaxException;
+-import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+-import java.util.function.Predicate;
+-import net.minecraft.commands.CommandBuildContext;
+-import net.minecraft.commands.CommandSourceStack;
+-import net.minecraft.commands.Commands;
+-import net.minecraft.commands.arguments.blocks.BlockInput;
+-import net.minecraft.commands.arguments.blocks.BlockStateArgument;
+-import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
+-import net.minecraft.core.BlockPos;
+-import net.minecraft.network.chat.Component;
+-import net.minecraft.server.level.ServerLevel;
+-import net.minecraft.world.level.block.Block;
+-import net.minecraft.world.level.block.state.BlockState;
+-import net.minecraft.world.level.block.state.pattern.BlockInWorld;
+-import org.jspecify.annotations.Nullable;
+-
+-public class SetBlockCommand {
+-    private static final SimpleCommandExceptionType ERROR_FAILED = new SimpleCommandExceptionType(Component.translatable("commands.setblock.failed"));
+-
+-    public static void register(final CommandDispatcher<CommandSourceStack> dispatcher, final CommandBuildContext context) {
+-        Predicate<BlockInWorld> filter = b -> b.getLevel().isEmptyBlock(b.getPos());
+-        dispatcher.register(
+-            Commands.literal("setblock")
+-                .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+-                .then(
+-                    Commands.argument("pos", BlockPosArgument.blockPos())
+-                        .then(
+-                            Commands.argument("block", BlockStateArgument.block(context))
+-                                .executes(
+-                                    c -> setBlock(
+-                                        c.getSource(),
+-                                        BlockPosArgument.getLoadedBlockPos(c, "pos"),
+-                                        BlockStateArgument.getBlock(c, "block"),
+-                                        SetBlockCommand.Mode.REPLACE,
+-                                        null,
+-                                        false
+-                                    )
+-                                )
+-                                .then(
+-                                    Commands.literal("destroy")
+-                                        .executes(
+-                                            c -> setBlock(
+-                                                c.getSource(),
+-                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
+-                                                BlockStateArgument.getBlock(c, "block"),
+-                                                SetBlockCommand.Mode.DESTROY,
+-                                                null,
+-                                                false
+-                                            )
+-                                        )
+-                                )
+-                                .then(
+-                                    Commands.literal("keep")
+-                                        .executes(
+-                                            c -> setBlock(
+-                                                c.getSource(),
+-                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
+-                                                BlockStateArgument.getBlock(c, "block"),
+-                                                SetBlockCommand.Mode.REPLACE,
+-                                                filter,
+-                                                false
+-                                            )
+-                                        )
+-                                )
+-                                .then(
+-                                    Commands.literal("replace")
+-                                        .executes(
+-                                            c -> setBlock(
+-                                                c.getSource(),
+-                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
+-                                                BlockStateArgument.getBlock(c, "block"),
+-                                                SetBlockCommand.Mode.REPLACE,
+-                                                null,
+-                                                false
+-                                            )
+-                                        )
+-                                )
+-                                .then(
+-                                    Commands.literal("strict")
+-                                        .executes(
+-                                            c -> setBlock(
+-                                                c.getSource(),
+-                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
+-                                                BlockStateArgument.getBlock(c, "block"),
+-                                                SetBlockCommand.Mode.REPLACE,
+-                                                null,
+-                                                true
+-                                            )
+-                                        )
+-                                )
+-                        )
+-                )
+-        );
+-    }
+-
+-    // Folia start - region threading
+-    private static void sendMessage(CommandSourceStack src, CommandSyntaxException ex) {
+-        src.sendFailure((Component)ex.getRawMessage());
+-    }
+-    // Folia end - region threading
+-
+-    private static int setBlock(
+-        final CommandSourceStack source,
+-        final BlockPos pos,
+-        final BlockInput block,
+-        final SetBlockCommand.Mode mode,
+-        final @Nullable Predicate<BlockInWorld> predicate,
+-        final boolean strict
+-    ) throws CommandSyntaxException {
+-        ServerLevel level = source.getLevel();
+-        // Folia start - region threading
+-        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
+-                level, pos.getX() >> 4, pos.getZ() >> 4, () -> {
+-                    try {
+-                        // Folia end - region threading
+-        if (level.isDebug()) {
+-            throw ERROR_FAILED.create();
+-        } else if (predicate != null && !predicate.test(new BlockInWorld(level, pos, true))) {
+-            throw ERROR_FAILED.create();
+-        } else {
+-            boolean placeNeeded;
+-            if (mode == SetBlockCommand.Mode.DESTROY) {
+-                level.destroyBlock(pos, true);
+-                placeNeeded = !block.getState().isAir() || !level.getBlockState(pos).isAir();
+-            } else {
+-                placeNeeded = true;
+-            }
+-
+-            BlockState oldState = level.getBlockState(pos);
+-            if (placeNeeded
+-                && !block.place(level, pos, Block.UPDATE_CLIENTS | (strict ? Block.UPDATE_SKIP_ALL_SIDEEFFECTS : Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS))) {
+-                throw ERROR_FAILED.create();
+-            } else {
+-                if (!strict) {
+-                    level.updateNeighboursOnBlockSet(pos, oldState);
+-                }
+-
+-                source.sendSuccess(() -> Component.translatable("commands.setblock.success", pos.getX(), pos.getY(), pos.getZ()), true);
+-                return; // Folia - region threading
+-            }
+-        }
+-        // Folia start - region threading
+-                } catch (CommandSyntaxException ex) {
+-                    sendMessage(source, ex);
+-                }
+-            });
+-        return 1;
+-        // Folia end - region threading
+-    }
+-
+-    public static enum Mode {
+-        REPLACE,
+-        DESTROY;
+-    }
+-}
++package net.minecraft.server.commands;
++
++import com.mojang.brigadier.CommandDispatcher;
++import com.mojang.brigadier.exceptions.CommandSyntaxException;
++import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
++import java.util.function.Predicate;
++import net.minecraft.commands.CommandBuildContext;
++import net.minecraft.commands.CommandSourceStack;
++import net.minecraft.commands.Commands;
++import net.minecraft.commands.arguments.blocks.BlockInput;
++import net.minecraft.commands.arguments.blocks.BlockStateArgument;
++import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
++import net.minecraft.core.BlockPos;
++import net.minecraft.network.chat.Component;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.level.block.Block;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.block.state.pattern.BlockInWorld;
++import org.jspecify.annotations.Nullable;
++
++public class SetBlockCommand {
++    private static final SimpleCommandExceptionType ERROR_FAILED = new SimpleCommandExceptionType(Component.translatable("commands.setblock.failed"));
++
++    public static void register(final CommandDispatcher<CommandSourceStack> dispatcher, final CommandBuildContext context) {
++        Predicate<BlockInWorld> filter = b -> b.getLevel().isEmptyBlock(b.getPos());
++        dispatcher.register(
++            Commands.literal("setblock")
++                .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
++                .then(
++                    Commands.argument("pos", BlockPosArgument.blockPos())
++                        .then(
++                            Commands.argument("block", BlockStateArgument.block(context))
++                                .executes(
++                                    c -> setBlock(
++                                        c.getSource(),
++                                        BlockPosArgument.getLoadedBlockPos(c, "pos"),
++                                        BlockStateArgument.getBlock(c, "block"),
++                                        SetBlockCommand.Mode.REPLACE,
++                                        null,
++                                        false
++                                    )
++                                )
++                                .then(
++                                    Commands.literal("destroy")
++                                        .executes(
++                                            c -> setBlock(
++                                                c.getSource(),
++                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
++                                                BlockStateArgument.getBlock(c, "block"),
++                                                SetBlockCommand.Mode.DESTROY,
++                                                null,
++                                                false
++                                            )
++                                        )
++                                )
++                                .then(
++                                    Commands.literal("keep")
++                                        .executes(
++                                            c -> setBlock(
++                                                c.getSource(),
++                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
++                                                BlockStateArgument.getBlock(c, "block"),
++                                                SetBlockCommand.Mode.REPLACE,
++                                                filter,
++                                                false
++                                            )
++                                        )
++                                )
++                                .then(
++                                    Commands.literal("replace")
++                                        .executes(
++                                            c -> setBlock(
++                                                c.getSource(),
++                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
++                                                BlockStateArgument.getBlock(c, "block"),
++                                                SetBlockCommand.Mode.REPLACE,
++                                                null,
++                                                false
++                                            )
++                                        )
++                                )
++                                .then(
++                                    Commands.literal("strict")
++                                        .executes(
++                                            c -> setBlock(
++                                                c.getSource(),
++                                                BlockPosArgument.getLoadedBlockPos(c, "pos"),
++                                                BlockStateArgument.getBlock(c, "block"),
++                                                SetBlockCommand.Mode.REPLACE,
++                                                null,
++                                                true
++                                            )
++                                        )
++                                )
++                        )
++                )
++        );
++    }
++
++    // Folia start - region threading
++    private static void sendMessage(CommandSourceStack src, CommandSyntaxException ex) {
++        src.sendFailure((Component)ex.getRawMessage());
++    }
++    // Folia end - region threading
++
++    private static int setBlock(
++        final CommandSourceStack source,
++        final BlockPos pos,
++        final BlockInput block,
++        final SetBlockCommand.Mode mode,
++        final @Nullable Predicate<BlockInWorld> predicate,
++        final boolean strict
++    ) throws CommandSyntaxException {
++        ServerLevel level = source.getLevel();
 +        // AzureBranches start - EXP deferred dispatch (v2)
 +        // When an EXP chain context is active, register the setblock work for
 +        // deferred batch dispatch by the chain Walker. Same-region work executes
@@ -86,12 +344,69 @@ index 582d977..9c0e8f7 100644
 +                    throw new RuntimeException(ex);
 +                }
 +            });
++
++            // AzureBranches - Phase-Based: write-through to PhaseSnapshot
++            final com.azurebranches.command.PhaseSnapshot phaseSnap =
++                com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++            if (phaseSnap != null) {
++                // Cache the expected block state so same-Phase reads see this write.
++                // For same-region, the write already executed synchronously;
++                // for cross-region, this marks the position for next-Phase pre-fetch.
++                final BlockState expectedState = block.getState();
++                phaseSnap.putBlock(pos.asLong(), expectedState);
++                if (!sameRegion) {
++                    phaseSnap.markPendingWrite(pos.asLong());
++                }
++            }
++
 +            // Real result is in the future, aggregated by the Walker after batch dispatch.
 +            // Return 1 consistently (matching Folia's fire-and-forget placeholder).
 +            return 1;
 +        }
 +        // AzureBranches end - EXP deferred dispatch
 +
-         // Folia start - region threading
-         io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
-                 level, pos.getX() >> 4, pos.getZ() >> 4, () -> {
++        // Folia start - region threading
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
++                level, pos.getX() >> 4, pos.getZ() >> 4, () -> {
++                    try {
++                        // Folia end - region threading
++        if (level.isDebug()) {
++            throw ERROR_FAILED.create();
++        } else if (predicate != null && !predicate.test(new BlockInWorld(level, pos, true))) {
++            throw ERROR_FAILED.create();
++        } else {
++            boolean placeNeeded;
++            if (mode == SetBlockCommand.Mode.DESTROY) {
++                level.destroyBlock(pos, true);
++                placeNeeded = !block.getState().isAir() || !level.getBlockState(pos).isAir();
++            } else {
++                placeNeeded = true;
++            }
++
++            BlockState oldState = level.getBlockState(pos);
++            if (placeNeeded
++                && !block.place(level, pos, Block.UPDATE_CLIENTS | (strict ? Block.UPDATE_SKIP_ALL_SIDEEFFECTS : Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS))) {
++                throw ERROR_FAILED.create();
++            } else {
++                if (!strict) {
++                    level.updateNeighboursOnBlockSet(pos, oldState);
++                }
++
++                source.sendSuccess(() -> Component.translatable("commands.setblock.success", pos.getX(), pos.getY(), pos.getZ()), true);
++                return; // Folia - region threading
++            }
++        }
++        // Folia start - region threading
++                } catch (CommandSyntaxException ex) {
++                    sendMessage(source, ex);
++                }
++            });
++        return 1;
++        // Folia end - region threading
++    }
++
++    public static enum Mode {
++        REPLACE,
++        DESTROY;
++    }
++}
