@@ -10,6 +10,7 @@ jobs:
     # Only run on PRs if the source branch is on someone else's repo
     if: ${{ github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout Git Repository
         uses: actions/checkout@v6
@@ -22,7 +23,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
       - name: Configure Git User Details
         run: git config --global user.email "actions@github.com" && git config --global user.name "Github Actions"
-      - name: Apply Patches
-        run: ./gradlew applyAllPatches --stacktrace
-      - name: Build
-        run: ./gradlew build
+      # The root project has no applyAllPatches task: it lives inside the cloned
+      # Folia tree and is driven by :azurebranches-server:buildFolia (which also
+      # runs cloneFolia, the azurepatches overlays and createPaperclipJar).
+      # The runner has ~7 GB RAM; cap the Gradle heap to leave room for the
+      # nested Folia build spawned by buildFolia.
+      - name: Build Folia (clone + applyAllPatches + paperclip)
+        run: ./gradlew :azurebranches-server:buildFolia --no-configuration-cache --stacktrace -Dorg.gradle.jvmargs=-Xmx4G
+      - name: Merge AzureBranches classes (EXP5Plus jar)
+        run: ./gradlew :azurebranches-server:mergeJar --no-configuration-cache --stacktrace -Dorg.gradle.jvmargs=-Xmx4G
