@@ -488,7 +488,36 @@ public class ScoreboardCommand {
      * cross-region semantics.</p>
      */
     private static int dispatch(final CommandSourceStack source, final RegionCommandExecutor.BlockTask<Integer> task) {
-        final CompletableFuture<Integer> future = RegionCommandExecutor.onGlobalAsync(task);
+        // EXP5Plus P2: propagate the EXP chain's PhaseSnapshot onto the global
+        // tick thread, so the data-pool interception hooks in Scoreboard keep
+        // recording score reads/writes into the same Phase (OCC capture).
+        final com.azurebranches.command.PhaseSnapshot snap =
+            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
+        final RegionCommandExecutor.BlockTask<Integer> wrapped = () -> {
+            if (snap != null) {
+                com.azurebranches.command.ExpChainSupport.setPhaseSnapshot(snap);
+            }
+            try {
+                return task.run();
+            } finally {
+                if (snap != null) {
+                    com.azurebranches.command.ExpChainSupport.clearPhaseSnapshot();
+                }
+            }
+        };
+        final CompletableFuture<Integer> future = RegionCommandExecutor.onGlobalAsync(wrapped);
+
+        // EXP5Plus P2: register the global-tick future with the EXP chain
+        // walker's receipt bag so the chain suspends until the scoreboard
+        // mutation has actually landed (and the PhaseSnapshot capture happened)
+        // before the next command block in the chain executes. No-op outside
+        // EXP chain contexts (players/console).
+        final CompletableFuture<Boolean> chainFuture =
+            com.azurebranches.command.ExpChainSupport.registerRemote();
+        if (chainFuture != null) {
+            future.whenComplete((result, ex) -> chainFuture.complete(ex == null));
+        }
+
         if (future.isDone()) {
             try {
                 return future.join();

@@ -261,32 +261,43 @@ tasks.register("buildFolia") {
         final com.azurebranches.command.Continuation cont,
         final com.azurebranches.command.PhaseSnapshot phaseSnap) {
 
-        // EXP5 P0#2: compensate scoreboard and entity-NBT writes before restoring
-        // blocks and replaying, so the replay does not double-apply them. The
-        // compensate methods are best-effort and log failures internally.
-        try {
-            com.azurebranches.command.ScoreLayer.compensate(phaseSnap,
-                (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
-                    net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
-                    level.getScoreboard().getObjective(objective)).get(),
-                (objective, holder, value) -> level.getScoreboard().getOrCreatePlayerScore(
-                    net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
-                    level.getScoreboard().getObjective(objective)).set(value));
-        } catch (final Throwable t) {
-            System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
-        }
-        try {
-            com.azurebranches.command.EntityLayer.compensate(phaseSnap,
-                (entityId, path) -> readEntityNbtPath(level, entityId, path),
-                (entityId, path, value) -> writeEntityNbtPath(level, entityId, path, value));
-        } catch (final Throwable t) {
-            System.err.println("[AzureBranches] entity-NBT compensation wiring failed: " + t.getMessage());
-        }
+        // EXP5Plus P2: scoreboard & entity-NBT compensation must run on their
+        // owning threads (scoreboard = global tick). Run compensation async
+        // first, then chain block restore + replay. Compensation is
+        // best-effort and logs failures internally.
+        net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
+            try {
+                com.azurebranches.command.ScoreLayer.compensate(phaseSnap,
+                    (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
+                        net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                        level.getScoreboard().getObjective(objective)).get(),
+                    (objective, holder, value) -> level.getScoreboard().getOrCreatePlayerScore(
+                        net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                        level.getScoreboard().getObjective(objective)).set(value));
+            } catch (final Throwable t) {
+                System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
+            }
+            try {
+                com.azurebranches.command.EntityLayer.compensate(phaseSnap,
+                    (entityId, path) -> readEntityNbtPath(level, entityId, path),
+                    (entityId, path, value) -> writeEntityNbtPath(level, entityId, path, value));
+            } catch (final Throwable t) {
+                System.err.println("[AzureBranches] entity-NBT compensation wiring failed: " + t.getMessage());
+            }
+            return null;
+        }).handle((v, ex) -> null).thenRun(() -> {
 
         final java.util.Map<Long, Object> oldStates = phaseSnap.getOldBlockStates();
         if (oldStates == null || oldStates.isEmpty()) {
-            // Nothing to roll back — retry immediately from the Phase start
-            retryExpChainPhase(head, level, headBlock, cont, phaseSnap);
+            // Nothing to roll back — retry from the Phase start on the head region
+            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+                .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
+                    if (!head.isCurrent(cont)) {
+                        com.azurebranches.command.ExpChainSupport.onSupersede();
+                        return;
+                    }
+                    retryExpChainPhase(head, level, headBlock, cont, phaseSnap);
+                });
             return;
         }
 
@@ -349,6 +360,7 @@ tasks.register("buildFolia") {
                         }
                         retryExpChainPhase(head, level, headBlock, cont, phaseSnap);
                     }));
+        });
     }
 
     private static void retryExpChainPhase(
@@ -475,7 +487,10 @@ tasks.register("buildFolia") {
         }
 
         final java.util.Map<Long, Object> readValues = phaseSnap.getReadSetValues();
-        if (readValues == null || readValues.isEmpty()) {
+        final java.util.Map<String, Integer> scoreReadValues = phaseSnap.getScoreReadSetValues();
+        final boolean hasBlockReads = readValues != null && !readValues.isEmpty();
+        final boolean hasScoreReads = scoreReadValues != null && !scoreReadValues.isEmpty();
+        if (!hasBlockReads && !hasScoreReads) {
             com.azurebranches.command.ExpChainSupport.onValidationPassed();
             commitDeferredActions(level, phaseSnap);
             walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
@@ -484,21 +499,52 @@ tasks.register("buildFolia") {
 
         final java.util.Map<Long, Boolean> modified = new java.util.concurrent.ConcurrentHashMap<>();
         final java.util.List<java.util.concurrent.CompletableFuture<Void>> checks =
-            new java.util.ArrayList<>(readValues.size());
-        for (final java.util.Map.Entry<Long, Object> entry : readValues.entrySet()) {
-            final BlockPos checkPos = BlockPos.of(entry.getKey());
-            final Object expected = entry.getValue();
-            final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
-            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
-                .queueOrExecuteTickTask(level, checkPos.getX() >> 4, checkPos.getZ() >> 4, () -> {
-                    try {
-                        final BlockState current = level.getBlockState(checkPos);
-                        modified.put(entry.getKey(), !java.util.Objects.equals(current, expected));
-                    } finally {
-                        done.complete(null);
+            new java.util.ArrayList<>(readValues != null ? readValues.size() : 0);
+        if (hasBlockReads) {
+            for (final java.util.Map.Entry<Long, Object> entry : readValues.entrySet()) {
+                final BlockPos checkPos = BlockPos.of(entry.getKey());
+                final Object expected = entry.getValue();
+                final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
+                io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
+                    .queueOrExecuteTickTask(level, checkPos.getX() >> 4, checkPos.getZ() >> 4, () -> {
+                        try {
+                            final BlockState current = level.getBlockState(checkPos);
+                            modified.put(entry.getKey(), !java.util.Objects.equals(current, expected));
+                        } finally {
+                            done.complete(null);
+                        }
+                    });
+                checks.add(done);
+            }
+        }
+
+        // EXP5Plus P2: verify the score read-set against the live scoreboard on
+        // the global tick thread (scoreboard is server-global data).
+        final java.util.Map<String, Boolean> modifiedScores = new java.util.concurrent.ConcurrentHashMap<>();
+        if (hasScoreReads) {
+            for (final java.util.Map.Entry<String, Integer> entry : scoreReadValues.entrySet()) {
+                final String key = entry.getKey();
+                final int expected = entry.getValue();
+                final int colon = key.indexOf(':');
+                if (colon < 0) {
+                    continue;
+                }
+                final String objectiveName = key.substring(0, colon);
+                final String holderName = key.substring(colon + 1);
+                checks.add(net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
+                    Integer live = null;
+                    final net.minecraft.world.scores.Objective obj = level.getScoreboard().getObjective(objectiveName);
+                    if (obj != null) {
+                        final net.minecraft.world.scores.ReadOnlyScoreInfo info = level.getScoreboard()
+                            .getPlayerScoreInfo(net.minecraft.world.scores.ScoreHolder.forNameOnly(holderName), obj);
+                        if (info != null) {
+                            live = info.value();
+                        }
                     }
-                });
-            checks.add(done);
+                    modifiedScores.put(key, live == null || live != expected);
+                    return null;
+                }));
+            }
         }
 
         java.util.concurrent.CompletableFuture.allOf(
@@ -511,7 +557,7 @@ tasks.register("buildFolia") {
                             return;
                         }
                         final com.azurebranches.command.PhaseValidator.ValidationResult result =
-                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified);
+                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified, modifiedScores);
                         switch (result) {
                             case COMMIT -> {
                                 com.azurebranches.command.ExpChainSupport.onValidationPassed();
@@ -617,6 +663,109 @@ tasks.register("buildFolia") {
                     "    }\n" +
                     "\n" +
                     "    public static WorldDataConfiguration configurePackRepository("
+            )
+
+            // EXP5Plus P2: intercept the Scoreboard data pool so /scoreboard (and
+            // any scoreboard access) inside an EXP command-block chain records
+            // reads/writes into the PhaseSnapshot — score read-set values for OCC
+            // validation and pre-write old values for ScoreLayer rollback.
+            val scoreboardFile = File(minecraftSrc, "net/minecraft/world/scores/Scoreboard.java")
+            transformSource(scoreboardFile, "Scoreboard.java (EXP5Plus score interception)",
+                // READ hook: cache read-through + read-set value recording.
+                "    public @Nullable ReadOnlyScoreInfo getPlayerScoreInfo(final ScoreHolder name, final Objective objective) {\n" +
+                    "        PlayerScores playerScore = this.playerScores.get(name.getScoreboardName());\n" +
+                    "        return playerScore != null ? playerScore.get(objective) : null;\n" +
+                    "    }" to
+                    "    public @Nullable ReadOnlyScoreInfo getPlayerScoreInfo(final ScoreHolder name, final Objective objective) {\n" +
+                    "        // AzureBranches EXP5Plus: PhaseSnapshot score read interception\n" +
+                    "        final com.azurebranches.command.PhaseSnapshot _expSnap =\n" +
+                    "            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();\n" +
+                    "        PlayerScores playerScore = this.playerScores.get(name.getScoreboardName());\n" +
+                    "        final ReadOnlyScoreInfo _info = playerScore != null ? playerScore.get(objective) : null;\n" +
+                    "        if (_expSnap != null) {\n" +
+                    "            final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(\n" +
+                    "                objective.getName(), name.getScoreboardName());\n" +
+                    "            final Integer _cached = _expSnap.getCachedScore(_key);\n" +
+                    "            if (_cached != null) {\n" +
+                    "                com.azurebranches.command.ExpChainSupport.onScoreInterceptCacheHit();\n" +
+                    "                final int _value = _cached;\n" +
+                    "                return new ReadOnlyScoreInfo() {\n" +
+                    "                    @Override\n" +
+                    "                    public int value() { return _value; }\n" +
+                    "                    @Override\n" +
+                    "                    public boolean isLocked() { return false; }\n" +
+                    "                    @Override\n" +
+                    "                    public net.minecraft.network.chat.numbers.NumberFormat numberFormat() { return null; }\n" +
+                    "                };\n" +
+                    "            }\n" +
+                    "            if (_info != null) {\n" +
+                    "                _expSnap.recordScoreRead(_key, _info.value(), _expSnap.getSnapshotTick());\n" +
+                    "                com.azurebranches.command.ExpChainSupport.onScoreInterceptRead();\n" +
+                    "            }\n" +
+                    "        }\n" +
+                    "        return _info;\n" +
+                    "    }",
+
+                // WRITE hook: the anonymous ScoreAccess.set is the single mutation
+                // point for set/add/increment/reset (all others delegate to set).
+                "                } else {\n" +
+                    "                    boolean hasChanged = requiresSync.isTrue();" to
+                    "                } else {\n" +
+                    "                    // AzureBranches EXP5Plus: PhaseSnapshot score write interception\n" +
+                    "                    final com.azurebranches.command.PhaseSnapshot _expSnap =\n" +
+                    "                        com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();\n" +
+                    "                    if (_expSnap != null) {\n" +
+                    "                        final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(\n" +
+                    "                            objective.getName(), scoreHolder.getScoreboardName());\n" +
+                    "                        _expSnap.putScore(_key, value, score.value());\n" +
+                    "                        _expSnap.markPendingScore(_key);\n" +
+                    "                        com.azurebranches.command.ExpChainSupport.onScoreInterceptWrite();\n" +
+                    "                    }\n" +
+                    "                    boolean hasChanged = requiresSync.isTrue();",
+
+                // WRITE hook: resetAllPlayerScores removes entries without going
+                // through ScoreAccess — capture old values first.
+                "    public void resetAllPlayerScores(final ScoreHolder player) {\n" +
+                    "        PlayerScores removed = this.playerScores.remove(player.getScoreboardName());" to
+                    "    public void resetAllPlayerScores(final ScoreHolder player) {\n" +
+                    "        // AzureBranches EXP5Plus: capture old values before removal for OCC rollback\n" +
+                    "        final com.azurebranches.command.PhaseSnapshot _expSnap =\n" +
+                    "            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();\n" +
+                    "        if (_expSnap != null) {\n" +
+                    "            final PlayerScores _existing = this.playerScores.get(player.getScoreboardName());\n" +
+                    "            if (_existing != null) {\n" +
+                    "                _existing.listRawScores().forEach((objective, score) -> {\n" +
+                    "                    final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(\n" +
+                    "                        objective.getName(), player.getScoreboardName());\n" +
+                    "                    _expSnap.putScore(_key, 0, score.value());\n" +
+                    "                    _expSnap.markPendingScore(_key);\n" +
+                    "                    com.azurebranches.command.ExpChainSupport.onScoreInterceptWrite();\n" +
+                    "                });\n" +
+                    "            }\n" +
+                    "        }\n" +
+                    "        PlayerScores removed = this.playerScores.remove(player.getScoreboardName());",
+
+                // WRITE hook: resetSinglePlayerScore removes a single entry.
+                "    public void resetSinglePlayerScore(final ScoreHolder player, final Objective objective) {\n" +
+                    "        PlayerScores scores = this.playerScores.get(player.getScoreboardName());" to
+                    "    public void resetSinglePlayerScore(final ScoreHolder player, final Objective objective) {\n" +
+                    "        // AzureBranches EXP5Plus: capture old value before removal for OCC rollback\n" +
+                    "        final com.azurebranches.command.PhaseSnapshot _expSnap =\n" +
+                    "            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();\n" +
+                    "        if (_expSnap != null) {\n" +
+                    "            final PlayerScores _scores = this.playerScores.get(player.getScoreboardName());\n" +
+                    "            if (_scores != null) {\n" +
+                    "                final Score _existing = _scores.get(objective);\n" +
+                    "                if (_existing != null) {\n" +
+                    "                    final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(\n" +
+                    "                        objective.getName(), player.getScoreboardName());\n" +
+                    "                    _expSnap.putScore(_key, 0, _existing.value());\n" +
+                    "                    _expSnap.markPendingScore(_key);\n" +
+                    "                    com.azurebranches.command.ExpChainSupport.onScoreInterceptWrite();\n" +
+                    "                }\n" +
+                    "            }\n" +
+                    "        }\n" +
+                    "        PlayerScores scores = this.playerScores.get(player.getScoreboardName());"
             )
         }
 

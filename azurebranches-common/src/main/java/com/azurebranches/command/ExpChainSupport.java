@@ -183,6 +183,20 @@ public final class ExpChainSupport {
     }
 
     /**
+     * EXP5Plus: Seed the PhaseSnapshot onto the current thread.
+     *
+     * <p>The snapshot ThreadLocal is naturally visible only on the home region
+     * thread during Walking. Commands that hop to another thread to touch
+     * server-global data (e.g. {@code /scoreboard} dispatching to the global
+     * tick thread) must re-seed it there so the data-pool interception hooks
+     * (score read/write capture) keep recording into the same Phase. Callers
+     * are responsible for clearing it afterwards (try/finally).</p>
+     */
+    public static void setPhaseSnapshot(final PhaseSnapshot snapshot) {
+        PHASE_SNAPSHOT.set(snapshot);
+    }
+
+    /**
      * Called by awaitable-patched commands when they need to register a
      * CompletableFuture for result aggregation. Returns null when no EXP
      * chain context is active.
@@ -381,6 +395,11 @@ public final class ExpChainSupport {
     private static final AtomicLong scoreCompensations = new AtomicLong();
     private static final AtomicLong scoreCompensationFailures = new AtomicLong();
 
+    // EXP5Plus: Scoreboard data-pool interception statistics
+    private static final AtomicLong scoreInterceptWrites = new AtomicLong();
+    private static final AtomicLong scoreInterceptReads = new AtomicLong();
+    private static final AtomicLong scoreInterceptCacheHits = new AtomicLong();
+
     // EXP4: EntityLayer NBT interception statistics
     private static final AtomicLong nbtCacheHits = new AtomicLong();
     private static final AtomicLong nbtInterceptWrites = new AtomicLong();
@@ -412,6 +431,15 @@ public final class ExpChainSupport {
 
     /** EXP4: Record a block read intercepted at the data pool level. */
     public static void onDataInterceptBlockRead() { dataInterceptBlockReads.incrementAndGet(); }
+
+    /** EXP5Plus: Record a score write intercepted at the data pool level. */
+    public static void onScoreInterceptWrite() { scoreInterceptWrites.incrementAndGet(); }
+
+    /** EXP5Plus: Record a score read intercepted at the data pool level. */
+    public static void onScoreInterceptRead() { scoreInterceptReads.incrementAndGet(); }
+
+    /** EXP5Plus: Record a PhaseSnapshot score cache hit. */
+    public static void onScoreInterceptCacheHit() { scoreInterceptCacheHits.incrementAndGet(); }
 
     public static void onTimeout(final String command) {
         final long n = timeouts.incrementAndGet();
@@ -452,6 +480,15 @@ public final class ExpChainSupport {
 
     /** EXP4: Data pool block read interception count. */
     public static long dataInterceptBlockReadCount() { return dataInterceptBlockReads.get(); }
+
+    /** EXP5Plus: Score write interception count. */
+    public static long scoreInterceptWriteCount() { return scoreInterceptWrites.get(); }
+
+    /** EXP5Plus: Score read interception count. */
+    public static long scoreInterceptReadCount() { return scoreInterceptReads.get(); }
+
+    /** EXP5Plus: Score cache hit count. */
+    public static long scoreInterceptCacheHitCount() { return scoreInterceptCacheHits.get(); }
 
     /** EXP4: Record score compensation on Phase rollback. */
     public static void onScoreCompensated(final int count) {

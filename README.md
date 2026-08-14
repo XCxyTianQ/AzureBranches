@@ -135,6 +135,18 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 - 建议提供器（suggestTriggers 等）保留只读直查，与 /trigger 同等的 best-effort 语义
 - 异步路径返回乐观占位值 1，快路径（控制台）返回精确结果，与 /data 语义一致
 
+**P2 — 命令方块 EXP OCC 闭环**
+- `PhaseSnapshot` 增加积分板读集取值层（`scoreReadSetValues` + `recordScoreRead(key, value, tick)`），`resetForRetry` 同步清理
+- `ExpChainSupport.setPhaseSnapshot`：跨线程传播快照；`ScoreboardCommand.dispatch` 把链的 PhaseSnapshot 种子到全局 tick 任务上（try/finally 清理），使数据池钩子持续记录到同一 Phase
+- 全局 tick future 注册进 EXP 链回执袋（`registerRemote`）：链在积分板变异与捕获落地后才继续下一块命令方块
+- **数据池拦截（transformSource 注入 Scoreboard.java）**：
+  - 读：`getPlayerScoreInfo` 缓存透传（同 Phase 读己写）+ 读集取值记录（OCC 基线）
+  - 写：匿名 `ScoreAccess.set`（set/add/increment/reset 的唯一变异点）捕获 `putScore(new, old)` + `markPendingScore`
+  - `resetAllPlayerScores` / `resetSinglePlayerScore` 移除前捕获旧值
+- **OCC 验证接通**：`verifyReadSetAndResume` 把积分板读集比对派发到全局 tick（live vs observed），结果喂给 `PhaseValidator.validate` 的 `CHECK_SCORE_READ_SET` → RETRY 可达
+- **回滚补偿改道**：`rollbackAndRetryExpChain` 中 `ScoreLayer.compensate` / `EntityLayer.compensate` 先经 `onGlobalAsync` 在全局 tick 执行，再链式恢复方块、回到头 Region 重放 Phase
+- 新增积分板拦截计数器（写/读/缓存命中）
+
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP5Plus)。
 
 ## 架构概览

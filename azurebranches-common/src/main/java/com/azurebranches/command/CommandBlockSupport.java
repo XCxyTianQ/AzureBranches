@@ -11,9 +11,11 @@
  *            teleportAsync, region-aware selectors) and may complete
  *            asynchronously: same-region semantics are vanilla; cross-region
  *            success counts / chain conditions are best-effort.
- *   EXP    - Reserved for the coordinator-thread design (synchronous
- *            cross-region chain semantics). Not implemented yet; currently
- *            behaves like ACCESS and logs a one-time notice.
+ *   EXP    - Suspendable / resumable command block chains driven by the
+ *            ChainHead walker (EXP2+): PhaseSnapshot consistency, OCC
+ *            read-set validation (EXP3+), ScoreLayer/EntityLayer/DeferredAction
+ *            rollback (EXP4+), and cross-region async command execution
+ *            (EXP4Plus/EXP5/EXP5Plus).
  *
  * Zero Minecraft-internal imports by design.
  */
@@ -68,7 +70,7 @@ public final class CommandBlockSupport {
         }
         if (mode == Mode.EXP && !expNoticeLogged) {
             expNoticeLogged = true;
-            System.out.println("[AzureBranches] command_blocks.mode=EXP: coordinator thread not implemented yet, behaving like ACCESS");
+            System.out.println("[AzureBranches] command_blocks.mode=EXP: suspendable chain walker active (PhaseSnapshot + OCC validation)");
         }
         return true;
     }

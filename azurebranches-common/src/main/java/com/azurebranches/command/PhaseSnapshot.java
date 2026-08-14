@@ -79,6 +79,13 @@ public final class PhaseSnapshot {
     /** Score keys read during this Phase (OCC read-set for scores). */
     private final Map<String, Long> scoreReadSet;
 
+    /**
+     * EXP5Plus: The score value actually observed at each read position,
+     * captured at read time. This is what OCC validation compares against the
+     * live scoreboard to detect a non-repeatable score read.
+     */
+    private final Map<String, Integer> scoreReadSetValues;
+
     // ================================================================
     //  EXP4: Entity NBT layer (EntityLayer backing store)
     // ================================================================
@@ -156,6 +163,7 @@ public final class PhaseSnapshot {
         this.oldScoreValues = new HashMap<>();
         this.pendingScoreKeys = new HashSet<>();
         this.scoreReadSet = new HashMap<>();
+        this.scoreReadSetValues = new HashMap<>();
         this.nbtCache = new HashMap<>();
         this.nbtOldValues = new HashMap<>();
         this.nbtReadSet = new HashMap<>();
@@ -292,6 +300,25 @@ public final class PhaseSnapshot {
      */
     public void recordScoreRead(final String key, final long tick) {
         scoreReadSet.putIfAbsent(key, tick);
+    }
+
+    /**
+     * EXP5Plus: Record a score read together with the value observed at that
+     * moment. The observed value is the baseline for OCC score read-set
+     * validation (compared against the live scoreboard at Phase resume).
+     */
+    public void recordScoreRead(final String key, final int value, final long tick) {
+        scoreReadSet.putIfAbsent(key, tick);
+        scoreReadSetValues.putIfAbsent(key, value);
+    }
+
+    /**
+     * EXP5Plus: Score keys → the value observed when they were read.
+     * Used by the EXP chain walker to verify the score read-set against the
+     * live scoreboard on the global tick thread.
+     */
+    public Map<String, Integer> getScoreReadSetValues() {
+        return scoreReadSetValues;
     }
 
     /** Get the score read-set for validation. */
@@ -589,6 +616,7 @@ public final class PhaseSnapshot {
         scoreCache.clear();
         pendingScoreKeys.clear();
         scoreReadSet.clear();
+        scoreReadSetValues.clear();
         nbtCache.clear();
         nbtReadSet.clear();
         deferredActions.clear();
