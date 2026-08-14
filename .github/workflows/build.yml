@@ -28,7 +28,31 @@ jobs:
       # runs cloneFolia, the azurepatches overlays and createPaperclipJar).
       # The runner has ~7 GB RAM; cap the Gradle heap to leave room for the
       # nested Folia build spawned by buildFolia.
+      # repo.papermc.io intermittently returns 502: enable Gradle repository
+      # retries and wrap the step in a retry loop.
       - name: Build Folia (clone + applyAllPatches + paperclip)
-        run: ./gradlew :azurebranches-server:buildFolia --no-configuration-cache --stacktrace -Dorg.gradle.jvmargs=-Xmx4G
+        run: |
+          for i in 1 2 3; do
+            if ./gradlew :azurebranches-server:buildFolia --no-configuration-cache --stacktrace \
+                -Dorg.gradle.jvmargs=-Xmx4G \
+                -Dorg.gradle.internal.repository.max.tentatives=10 \
+                -Dorg.gradle.internal.repository.initial.backoff=1000; then
+              exit 0
+            fi
+            echo "::warning::buildFolia attempt $i failed, retrying in 15s"
+            sleep 15
+          done
+          exit 1
       - name: Merge AzureBranches classes (EXP5Plus jar)
-        run: ./gradlew :azurebranches-server:mergeJar --no-configuration-cache --stacktrace -Dorg.gradle.jvmargs=-Xmx4G
+        run: |
+          for i in 1 2 3; do
+            if ./gradlew :azurebranches-server:mergeJar --no-configuration-cache --stacktrace \
+                -Dorg.gradle.jvmargs=-Xmx4G \
+                -Dorg.gradle.internal.repository.max.tentatives=10 \
+                -Dorg.gradle.internal.repository.initial.backoff=1000; then
+              exit 0
+            fi
+            echo "::warning::mergeJar attempt $i failed, retrying in 15s"
+            sleep 15
+          done
+          exit 1
