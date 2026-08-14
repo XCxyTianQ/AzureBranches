@@ -145,15 +145,14 @@ tasks.register("cloneFolia") {
         }
         check(sh(dir = foliaDir, cmd = *arrayOf("git", "checkout", "--detach", "FETCH_HEAD")) == 0) { "git checkout failed" }
 
-        // Pre-seed PaperMC/Paper git cache so checkoutPaperRepo doesn't need network
-        val paperCache = File(foliaDir, ".gradle/caches/paperweight/upstreams/paper")
-        if (!File(paperCache, ".git").exists()) {
-            println("Pre-seeding Paper git cache (may take a few minutes)...")
-            paperCache.mkdirs()
-            sh(cmd = *arrayOf("git", "clone", "--bare",
-                "https://github.com/PaperMC/Paper.git", paperCache.absolutePath))
-            println("Paper cache ready")
-        }
+        // NOTE: we intentionally do NOT pre-seed the PaperMC/Paper cache here.
+        // A fire-and-forget `git clone --bare` (unchecked exit code) silently
+        // produced a broken cache on CI, which poisoned paperweight's
+        // setupMacheSources build-cache entry: every subsequent run restored
+        // that polluted mache state and the Folia feature patches failed to
+        // apply ("sha1 information is lacking or useless", patch 0014). Let
+        // paperweight's own checkoutPaperRepo clone Paper with its own
+        // verification instead.
 
         syncAzureSources()
     }
