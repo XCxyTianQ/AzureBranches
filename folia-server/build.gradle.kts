@@ -16,7 +16,12 @@ import java.time.Instant
 plugins { id("java-library") }
 
 val foliaRepo  = "https://github.com/PaperMC/Folia.git"
-val foliaRef   = "ver/26.1.x"
+// Pin the exact upstream commit the AzureBranches patches and
+// transformSource anchors were generated against. Cloning the moving
+// ver/26.1.x branch head breaks patch application in CI (upstream context
+// drift + no history in a depth-1 clone for the 3-way fallback). Bump this
+// deliberately together with a patch/anchors re-base.
+val foliaRef   = "62dc0f257a4f5de1ef2eae8cf1627156a769c67f"
 val foliaDir   = file("build/folia-src")
 
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
@@ -133,8 +138,12 @@ tasks.register("cloneFolia") {
         }
         foliaDir.parentFile.mkdirs()
         println("Cloning Folia $foliaRef ...")
-        check(sh(cmd = *arrayOf("git", "clone", "--branch", foliaRef,
-            "--depth", "1", foliaRepo, foliaDir.absolutePath)) == 0) { "git clone failed" }
+        check(sh(cmd = *arrayOf("git", "init", foliaDir.absolutePath)) == 0) { "git init failed" }
+        check(sh(dir = foliaDir, cmd = *arrayOf("git", "remote", "add", "origin", foliaRepo)) == 0) { "git remote add failed" }
+        check(sh(dir = foliaDir, cmd = *arrayOf("git", "fetch", "--depth", "1", "origin", foliaRef)) == 0) {
+            "git fetch $foliaRef failed"
+        }
+        check(sh(dir = foliaDir, cmd = *arrayOf("git", "checkout", "--detach", "FETCH_HEAD")) == 0) { "git checkout failed" }
 
         // Pre-seed PaperMC/Paper git cache so checkoutPaperRepo doesn't need network
         val paperCache = File(foliaDir, ".gradle/caches/paperweight/upstreams/paper")
