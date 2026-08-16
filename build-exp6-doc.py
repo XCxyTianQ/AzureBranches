@@ -113,7 +113,7 @@ para("3.1　六条执行流的捕获点", 12, True, "left", 0, 6, 6)
 para("**getData / getNumeric（路径读）**：getSingleTag 解析出 Tag 后调用 interceptEntityRead → **EntityLayer.recordReadValue**：键命中本 Phase 写缓存则只计缓存命中（与积分板读钩同构，**不记读集**，避免读己写自冲突）；否则将（键, 观测值, 0）写入读集取值层。异步路径在 getDataAsync 完成回调（实体区域线程）上解析并捕获，解析后的 Tag 再交 runOnSource 回源展示。**resolveSourcePath（modify from 源路径读）**：同构捕获源实体的路径读。**manipulateData / removeData / mergeData（写）**：变异前 readLeaf 拷贝旧值，变异后 readLeaf 取新值，**写入落地后**（setData/setDataAsync 成功）调用 interceptEntityWrite——写失败不残留幻影补偿数据；remove 以 **EntityLayer.REMOVED** 哨兵标记，补偿时按“恢复旧值”处理；无路径的 merge 走顶层浅差集（after.keySet() 逐键比较）。块/存储访问器一律跳过（instanceof EntityDataAccessor 判定）。表 2 列出接线状态。", 10.5, False, "justify", 2, 6, 0)
 table([
     ["执行流", "捕获内容", "执行面", "状态"],
-    ["get / getNumeric（路径）",  "读集取值 recordReadValue", "快路径内联 / 实体区域回调", "已接线"],
+    ["get / getNumeric（路径）",  "interceptRead 缓存判定 + recordReadValue 读集取值", "快路径内联 / 实体区域回调", "已接线"],
     ["modify from <sourcePath>", "源实体路径读集", "实体区域回调", "已接线"],
     ["modify（set/merge/insert/append/prepend）", "路径写 (new, old)", "写落地后（快/异步）", "已接线"],
     ["merge（无路径，顶层浅差集）", "逐顶层键 (new, old)", "写落地后（快/异步）", "已接线"],

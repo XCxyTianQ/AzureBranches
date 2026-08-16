@@ -317,8 +317,16 @@ public final class EntityLayer {
     // ================================================================
 
     /**
-     * Intercept an NBT read during Phase execution. Checks the PhaseSnapshot
-     * cache first; on cache miss, records the read for OCC validation.
+     * EXP6: Cache-check entry of an NBT read during Phase execution — the
+     * read-your-writes judgment used by {@link #recordReadValue}.
+     *
+     * <p>Checks the PhaseSnapshot write cache first: on hit, returns the
+     * cached value (the caller must then record NOTHING — a read satisfied
+     * by our own write must not enter the read-set, or validation would see
+     * our own write as an external modification and self-conflict forever).
+     * On miss, registers the key with the read tick in the read-set and
+     * returns null, signalling "read from live entity"; the caller then
+     * records the observed value via {@link #recordReadValue}.</p>
      *
      * @param snap     the current PhaseSnapshot
      * @param entityId the entity's network ID
@@ -349,18 +357,22 @@ public final class EntityLayer {
             return cached;
         }
 
-        // Cache miss — record the read for OCC validation
+        // Cache miss — register the read key for OCC validation
         snap.recordNbtRead(key, tick);
         return null; // caller should read from live entity
     }
 
     /**
-     * EXP6: Record the value actually observed by an NBT read, with
-     * read-your-writes semantics: when this Phase already wrote the key,
-     * the read is satisfied by our own cache and is deliberately NOT
-     * added to the read-set (mirrors the scoreboard read hook) — recording
-     * it would make our own write look like an external modification at
-     * validation time and cause endless self-conflicts.
+     * EXP6: Record the value actually observed by an NBT read.
+     *
+     * <p>Delegates the read-your-writes judgment to {@link #interceptRead}:
+     * when this Phase already wrote the key, the read is satisfied by our
+     * own cache and deliberately NOT added to the read-set (mirrors the
+     * scoreboard read hook) — recording it would make our own write look
+     * like an external modification at validation time and cause endless
+     * self-conflicts. On a cache miss, {@code interceptRead} has already
+     * registered the key with the read tick; this method adds the observed
+     * value so CHECK_NBT_READ_SET can compare it against the live entity.</p>
      *
      * @param snap      the current PhaseSnapshot
      * @param entityId  the entity's network ID
@@ -382,15 +394,12 @@ public final class EntityLayer {
         if (snap == null || !isEntityLayerEnabled()) {
             return;
         }
-        final String key = nbtKey(entityId, tagName, slotKey, subField);
-        final Object cached = snap.getNbtCached(key);
+        final Object cached = interceptRead(snap, entityId, tagName, slotKey, subField, tick);
         if (cached != null && cached != REMOVED) {
-            // Same-Phase write visible to this read — the value we would see
-            // is our own; no read-set entry (see javadoc).
-            ExpChainSupport.onNbtCacheHit();
+            // Same-Phase write visible to this read — no read-set entry (see javadoc).
             return;
         }
-        snap.recordNbtRead(key, liveValue, tick);
+        snap.recordNbtRead(nbtKey(entityId, tagName, slotKey, subField), liveValue, tick);
     }
 
     /**
