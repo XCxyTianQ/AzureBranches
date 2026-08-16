@@ -48,6 +48,17 @@ public class EntityDataAccessor implements DataAccessor {
         this.entity = entity;
     }
 
+    /**
+     * AzureBranches EXP6: the target entity's network ID.
+     *
+     * <p>The ID is assigned at spawn and stable for the entity's lifetime,
+     * so this read is safe from any thread. EntityLayer read/write capture
+     * uses it to build stable OCC keys without touching entity NBT.</p>
+     */
+    public int entityId() {
+        return this.entity.getId();
+    }
+
     private Component displayName() {
         // AzureBranches: capture the display name on the entity's region thread
         // (getModifiedSuccess/getPrintSuccess run on the source thread).

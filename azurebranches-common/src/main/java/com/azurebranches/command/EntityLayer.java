@@ -108,7 +108,7 @@ public final class EntityLayer {
         put("Air",               NbtCategory.NUMERIC);
         put("HurtTime",          NbtCategory.NUMERIC);
         put("DeathTime",         NbtCategory.NUMERIC);
-        put("FallDistance",      NbtCategory.NUMERIC);
+        put("fall_distance",     NbtCategory.NUMERIC); // 26.1 renamed (was FallDistance)
         put("Age",               NbtCategory.NUMERIC);
         put("ForcedAge",         NbtCategory.NUMERIC);
         put("InLove",            NbtCategory.NUMERIC);
@@ -148,15 +148,16 @@ public final class EntityLayer {
 
         // ── Container slots ──
         put("Inventory",    NbtCategory.SLOT);
-        put("ArmorItems",   NbtCategory.SLOT);
-        put("HandItems",    NbtCategory.SLOT);
+        put("ArmorItems",   NbtCategory.SLOT);  // legacy (pre-26.1)
+        put("HandItems",    NbtCategory.SLOT);  // legacy (pre-26.1)
+        put("equipment",    NbtCategory.SLOT);  // 26.1: merged HandItems/ArmorItems map
         put("EnderItems",   NbtCategory.SLOT);
         put("Items",        NbtCategory.SLOT);  // block entities (chest etc.)
 
         // ── Relational: entity references ──
         put("Passengers",   NbtCategory.RELATIONAL);
         put("Brain",        NbtCategory.RELATIONAL);
-        put("Leash",        NbtCategory.RELATIONAL);
+        put("leash",        NbtCategory.RELATIONAL); // 26.1 renamed (was Leash)
         put("Riding",       NbtCategory.RELATIONAL);
         put("AttachCapabilities", NbtCategory.RELATIONAL);
     }
@@ -222,8 +223,61 @@ public final class EntityLayer {
             }
         } else {
             sb.append(tagName);
+            if (subField != null && !subField.isEmpty()) {
+                sb.append('/').append(subField);
+            }
         }
         return sb.toString();
+    }
+
+    /**
+     * EXP6: Sentinel marking a tag that was <em>removed</em> during the Phase.
+     * Rollback compensation restores the recorded old value.
+     */
+    public static final Object REMOVED = new Object();
+
+    /**
+     * EXP6: Parse a raw NBT path string (as produced by
+     * {@code NbtPathArgument.NbtPath.asString()}) into EntityLayer key parts.
+     *
+     * <p>Accepted forms (all matching the vanilla /data path grammar):</p>
+     * <pre>
+     *   "Health"                  → {"Health", null, null}
+     *   "Pos[0]"                  → {"Pos[0]", null, null}
+     *   "foo.bar"                 → {"foo", null, "bar"}
+     *   "Inventory[{Slot:0b}]"    → {"Inventory", "Inventory{Slot:0b}", null}
+     *   "Inventory[{Slot:0b}].id" → {"Inventory", "Inventory{Slot:0b}", "id"}
+     * </pre>
+     *
+     * @return {tagName, slotKey, subField} — slotKey/subField are null when absent
+     */
+    public static String[] parsePathString(final String path) {
+        if (path == null || path.isEmpty()) {
+            return new String[] { "", null, null };
+        }
+        final int bracket = path.indexOf('[');
+        if (bracket >= 0) {
+            final int close = path.indexOf(']', bracket);
+            final String name = path.substring(0, bracket);
+            final String inside = close > bracket ? path.substring(bracket + 1, close) : "";
+            if (inside.startsWith("{")) {
+                // Slot match: "Inventory[{Slot:0b}]" / "Inventory[{Slot:0b}].id"
+                final String slotKey = name + inside;
+                String subField = null;
+                if (close + 1 < path.length() && path.charAt(close + 1) == '.') {
+                    subField = path.substring(close + 2).replace('.', '/');
+                }
+                return new String[] { name, slotKey, subField };
+            }
+            // Index form: "Pos[0]" / "Rotation[1]"
+            return new String[] { name + "[" + inside + "]", null, null };
+        }
+        final int dot = path.indexOf('.');
+        if (dot >= 0) {
+            return new String[] { path.substring(0, dot), null,
+                path.substring(dot + 1).replace('.', '/') };
+        }
+        return new String[] { path, null, null };
     }
 
     // ================================================================
@@ -298,6 +352,72 @@ public final class EntityLayer {
         // Cache miss — record the read for OCC validation
         snap.recordNbtRead(key, tick);
         return null; // caller should read from live entity
+    }
+
+    /**
+     * EXP6: Record the value actually observed by an NBT read, with
+     * read-your-writes semantics: when this Phase already wrote the key,
+     * the read is satisfied by our own cache and is deliberately NOT
+     * added to the read-set (mirrors the scoreboard read hook) — recording
+     * it would make our own write look like an external modification at
+     * validation time and cause endless self-conflicts.
+     *
+     * @param snap      the current PhaseSnapshot
+     * @param entityId  the entity's network ID
+     * @param tagName   the NBT tag being read
+     * @param slotKey   slot descriptor, or null
+     * @param subField  sub-field name, or null
+     * @param liveValue the value read from the live entity (may be null)
+     * @param tick      current game tick for the OCC read-set timestamp
+     */
+    public static void recordReadValue(
+        final PhaseSnapshot snap,
+        final int entityId,
+        final String tagName,
+        final String slotKey,
+        final String subField,
+        final Object liveValue,
+        final long tick
+    ) {
+        if (snap == null || !isEntityLayerEnabled()) {
+            return;
+        }
+        final String key = nbtKey(entityId, tagName, slotKey, subField);
+        final Object cached = snap.getNbtCached(key);
+        if (cached != null && cached != REMOVED) {
+            // Same-Phase write visible to this read — the value we would see
+            // is our own; no read-set entry (see javadoc).
+            ExpChainSupport.onNbtCacheHit();
+            return;
+        }
+        snap.recordNbtRead(key, liveValue, tick);
+    }
+
+    /**
+     * EXP6: Collect the distinct entity IDs referenced by this Phase's NBT
+     * keys, so the caller can dispatch compensation/validation per entity
+     * onto each entity's owning region thread.
+     *
+     * @param snap the PhaseSnapshot (may be null)
+     * @return the entity IDs (never null)
+     */
+    public static Set<Integer> entityIdsOf(final PhaseSnapshot snap) {
+        final Set<Integer> ids = new java.util.HashSet<>(4);
+        if (snap == null) {
+            return ids;
+        }
+        for (final String key : snap.nbtKeySet()) {
+            final int colon = key.indexOf(':');
+            if (colon <= 0) {
+                continue;
+            }
+            try {
+                ids.add(Integer.parseInt(key.substring(0, colon)));
+            } catch (final NumberFormatException ignored) {
+                // not an entity-scoped key
+            }
+        }
+        return ids;
     }
 
     // ================================================================
@@ -375,67 +495,119 @@ public final class EntityLayer {
 
         int compensated = 0;
         for (final String key : modifiedKeys) {
-            final Object oldVal = snap.getNbtOldValue(key);
-            final Object cachedNew = snap.getNbtCached(key);
-
-            if (oldVal == null || cachedNew == null) {
-                continue;
-            }
-
-            // Parse key: "entityId:tagName[/subField]" or "entityId:slotKey/subField"
-            final int colon = key.indexOf(':');
-            if (colon < 0) continue;
-            final String entityPart = key.substring(0, colon);
-            final String pathPart = key.substring(colon + 1);
-
-            final int entityId;
-            try {
-                entityId = Integer.parseInt(entityPart);
-            } catch (final NumberFormatException e) {
-                continue;
-            }
-
-            // Determine category from the path
-            // Path can be: "tagName" or "tagName[index]" or "slotKey/subField"
-            final String effectiveTag = extractTagName(pathPart);
-            final NbtCategory cat = categorize(effectiveTag);
-
-            try {
-                switch (cat) {
-                    case NUMERIC -> {
-                        if (compensateNumeric(key, pathPart, entityId, oldVal, cachedNew, reader, writer)) {
-                            compensated++;
-                        }
-                    }
-                    case VALUE -> {
-                        // Value restoration: write old value directly
-                        writer.write(entityId, pathPart, oldVal);
-                        compensated++;
-                    }
-                    case SLOT -> {
-                        // SLOT entries are sub-paths (e.g. "Inventory{Slot:0b}/id")
-                        // Each SLOT sub-field is individually categorized
-                        // We handle them here with delta/value logic
-                        if (compensateSlotField(key, pathPart, entityId, oldVal, cachedNew, reader, writer)) {
-                            compensated++;
-                        }
-                    }
-                    default -> {
-                        // IDENTITY/RELATIONAL: skip
-                    }
-                }
-            } catch (final Exception e) {
-                System.err.println(
-                    "[AzureBranches] EntityLayer: failed to compensate NBT key='"
-                    + key + "': " + e.getMessage());
-                ExpChainSupport.onNbtCompensationFailed();
-            }
+            compensated += compensateKey(snap, key, reader, writer);
         }
 
         if (compensated > 0) {
             ExpChainSupport.onNbtCompensated(compensated);
         }
         return compensated;
+    }
+
+    /**
+     * EXP6: Compensate only the NBT keys owned by one entity.
+     *
+     * <p>Entity NBT must be touched on the entity's owning region thread
+     * (Folia). The caller groups the Phase's keys with
+     * {@link #entityIdsOf(PhaseSnapshot)} and dispatches this method per
+     * entity via the region executor.</p>
+     *
+     * @param snap     the PhaseSnapshot from the failed Phase
+     * @param entityId the entity whose keys to compensate
+     * @param reader   reads live values for delta computation
+     * @param writer   writes compensated values back to the entity
+     * @return number of keys compensated
+     */
+    public static int compensateFor(
+        final PhaseSnapshot snap,
+        final int entityId,
+        final NbtReader reader,
+        final NbtWriter writer
+    ) {
+        final String prefix = entityId + ":";
+        int compensated = 0;
+        for (final String key : snap.nbtKeySet()) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            compensated += compensateKey(snap, key, reader, writer);
+        }
+        if (compensated > 0) {
+            ExpChainSupport.onNbtCompensated(compensated);
+        }
+        return compensated;
+    }
+
+    /**
+     * Compensate one intercepted NBT key.
+     *
+     * @return 1 when a compensation write was applied, else 0
+     */
+    private static int compensateKey(
+        final PhaseSnapshot snap,
+        final String key,
+        final NbtReader reader,
+        final NbtWriter writer
+    ) {
+        final Object oldVal = snap.getNbtOldValue(key);
+        final Object cachedNew = snap.getNbtCached(key);
+
+        if (oldVal == null || cachedNew == null) {
+            return 0;
+        }
+
+        // Parse key: "entityId:tagName[/subField]" or "entityId:slotKey/subField"
+        final int colon = key.indexOf(':');
+        if (colon < 0) {
+            return 0;
+        }
+        final String entityPart = key.substring(0, colon);
+        final String pathPart = key.substring(colon + 1);
+
+        final int entityId;
+        try {
+            entityId = Integer.parseInt(entityPart);
+        } catch (final NumberFormatException e) {
+            return 0;
+        }
+
+        // Determine category from the path
+        // Path can be: "tagName" or "tagName[index]" or "slotKey/subField"
+        final String effectiveTag = extractTagName(pathPart);
+        final NbtCategory cat = categorize(effectiveTag);
+
+        try {
+            switch (cat) {
+                case NUMERIC -> {
+                    return compensateNumeric(key, pathPart, entityId, oldVal, cachedNew, reader, writer) ? 1 : 0;
+                }
+                case VALUE -> {
+                    // Value restoration: write old value directly (also covers
+                    // REMOVED — a removed tag is restored by writing its old value).
+                    if (cachedNew == REMOVED || !oldVal.equals(cachedNew)) {
+                        writer.write(entityId, pathPart, oldVal);
+                        return 1;
+                    }
+                    return 0;
+                }
+                case SLOT -> {
+                    // SLOT entries are sub-paths (e.g. "Inventory{Slot:0b}/id")
+                    // Each SLOT sub-field is individually categorized
+                    // We handle them here with delta/value logic
+                    return compensateSlotField(key, pathPart, entityId, oldVal, cachedNew, reader, writer) ? 1 : 0;
+                }
+                default -> {
+                    // IDENTITY/RELATIONAL: skip
+                    return 0;
+                }
+            }
+        } catch (final Exception e) {
+            System.err.println(
+                "[AzureBranches] EntityLayer: failed to compensate NBT key='"
+                + key + "': " + e.getMessage());
+            ExpChainSupport.onNbtCompensationFailed();
+            return 0;
+        }
     }
 
     // ================================================================

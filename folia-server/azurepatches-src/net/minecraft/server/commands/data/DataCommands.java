@@ -2,6 +2,9 @@ package net.minecraft.server.commands.data;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.azurebranches.command.EntityLayer;
+import com.azurebranches.command.ExpChainSupport;
+import com.azurebranches.command.PhaseSnapshot;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
@@ -17,6 +20,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.BiConsumer;
@@ -317,17 +321,116 @@ public class DataCommands {
         return Component.translatable("command.failed");
     }
 
+    // ----------------------------------------------------------------
+    //  AzureBranches EXP6: EntityLayer capture (command-layer injection)
+    //  Every /data path read/write on an ENTITY is recorded into the active
+    //  PhaseSnapshot (OCC read-set / write cache) so a concurrent external
+    //  modification of the same entity NBT triggers Phase rollback + replay.
+    //
+    //  Threading: the snapshot is captured on the command's home thread and
+    //  passed explicitly into async callbacks, so capture works both on the
+    //  same-region fast path and the cross-region async path (the NBT maps
+    //  of PhaseSnapshot are concurrent). Block/storage accessors are skipped.
+    // ----------------------------------------------------------------
+
+    /** Normalize a Tag into a plain owned value for snapshot storage. */
+    private static Object leafValue(final Tag tag) {
+        if (tag == null) {
+            return null;
+        }
+        if (tag instanceof NumericTag numericTag) {
+            return numericTag.box();
+        }
+        if (tag instanceof StringTag stringTag) {
+            return stringTag.value();
+        }
+        return tag.copy(); // compound / list / array → owned deep copy
+    }
+
+    /** Resolve a path against an in-memory compound and normalize the first match. */
+    private static Object readLeaf(final NbtPathArgument.NbtPath path, final CompoundTag data) throws CommandSyntaxException {
+        final Collection<Tag> tags = path.get(data);
+        if (tags.isEmpty()) {
+            return null;
+        }
+        return leafValue(tags.iterator().next());
+    }
+
+    /** Record an entity-NBT path read into the PhaseSnapshot read-set. */
+    private static void interceptEntityRead(
+        final PhaseSnapshot snap,
+        final DataAccessor accessor,
+        final NbtPathArgument.NbtPath path,
+        final Tag liveTag
+    ) {
+        if (snap == null || !(accessor instanceof EntityDataAccessor entityAccessor)) {
+            return;
+        }
+        final String[] parts = EntityLayer.parsePathString(path.asString());
+        EntityLayer.recordReadValue(snap, entityAccessor.entityId(), parts[0], parts[1], parts[2],
+            leafValue(liveTag), 0L);
+    }
+
+    /** Record an entity-NBT path write into the PhaseSnapshot write cache. */
+    private static void interceptEntityWrite(
+        final PhaseSnapshot snap,
+        final DataAccessor accessor,
+        final NbtPathArgument.NbtPath path,
+        final Object newVal,
+        final Object oldVal
+    ) {
+        if (snap == null || !(accessor instanceof EntityDataAccessor entityAccessor)) {
+            return;
+        }
+        if (Objects.equals(newVal, oldVal)) {
+            return; // no net change → nothing to compensate or validate
+        }
+        final String[] parts = EntityLayer.parsePathString(path.asString());
+        EntityLayer.interceptWrite(snap, entityAccessor.entityId(), parts[0], parts[1], parts[2],
+            newVal, oldVal);
+    }
+
+    /**
+     * Record a pathless {@code /data merge entity} write: top-level shallow
+     * diff between the pre-merge and post-merge compounds.
+     */
+    private static void interceptEntityMergeWrite(
+        final PhaseSnapshot snap,
+        final DataAccessor accessor,
+        final CompoundTag before,
+        final CompoundTag after
+    ) {
+        if (snap == null || !(accessor instanceof EntityDataAccessor entityAccessor)) {
+            return;
+        }
+        for (final String name : after.keySet()) {
+            final Tag beforeTag = before.get(name);
+            final Tag afterTag = after.get(name);
+            if (!Objects.equals(beforeTag, afterTag)) {
+                EntityLayer.interceptWrite(snap, entityAccessor.entityId(), name, null, null,
+                    leafValue(afterTag), leafValue(beforeTag));
+            }
+        }
+    }
+
     private static CompletableFuture<List<Tag>> getSingletonSource(final CommandContext<CommandSourceStack> context, final DataCommands.DataProvider sourceProvider) throws CommandSyntaxException {
         DataAccessor source = sourceProvider.access(context);
         return source.getDataAsync().thenApply(data -> Collections.<Tag>singletonList(data));
     }
 
     private static CompletableFuture<List<Tag>> resolveSourcePath(final CommandContext<CommandSourceStack> context, final DataCommands.DataProvider sourceProvider) throws CommandSyntaxException {
-        DataAccessor source = sourceProvider.access(context);
-        NbtPathArgument.NbtPath sourcePath = NbtPathArgument.getPath(context, "sourcePath");
+        final DataAccessor source = sourceProvider.access(context);
+        final NbtPathArgument.NbtPath sourcePath = NbtPathArgument.getPath(context, "sourcePath");
+        // EXP6: capture the snapshot on the home thread; the read itself is
+        // recorded on whichever thread materializes the source compound.
+        final PhaseSnapshot snap = ExpChainSupport.getPhaseSnapshot();
         return source.getDataAsync().thenApply(data -> {
             try {
-                return sourcePath.get(data);
+                final List<Tag> tags = sourcePath.get(data);
+                if (!tags.isEmpty()) {
+                    interceptEntityRead(snap, source, sourcePath, tags.iterator().next());
+                }
+                return tags;
             } catch (CommandSyntaxException e) {
                 throw new CompletionException(e);
             }
@@ -354,17 +457,26 @@ public class DataCommands {
         final NbtPathArgument.NbtPath targetPath = NbtPathArgument.getPath(context, "targetPath");
         final CommandSourceStack sourceStack = context.getSource();
         final CompletableFuture<CompoundTag> targetDataFuture = target.getDataAsync();
+        // EXP6: capture the PhaseSnapshot on the home thread; interception
+        // runs on this thread (fast path) or on the materializing thread
+        // (async path) — the snapshot NBT maps are concurrent.
+        final PhaseSnapshot snap = ExpChainSupport.getPhaseSnapshot();
 
         // EXP5 P0#3: same-region fast path — exact synchronous result when both
         // the source read and the target read complete synchronously.
         if (source.isDone() && targetDataFuture.isDone()) {
             try {
                 final CompoundTag targetSnapshot = targetDataFuture.join();
+                final Object oldVal = snap != null ? readLeaf(targetPath, targetSnapshot) : null;
                 final int result = manipulator.modify(context, targetSnapshot, targetPath, source.join());
                 if (result == 0) {
                     throw ERROR_MERGE_UNCHANGED.create();
                 }
+                final Object newVal = snap != null ? readLeaf(targetPath, targetSnapshot) : null;
                 target.setData(targetSnapshot);
+                // Record only after the write landed — a failed write must not
+                // leave phantom compensation data in the snapshot.
+                interceptEntityWrite(snap, target, targetPath, newVal, oldVal);
                 sourceStack.sendSuccess(() -> target.getModifiedSuccess(), true);
                 return result;
             } catch (CompletionException | CommandSyntaxException e) {
@@ -375,15 +487,22 @@ public class DataCommands {
 
         source.thenCompose(src -> targetDataFuture.thenCompose(targetData -> {
             final int result;
+            final Object oldVal;
+            final Object newVal;
             try {
+                oldVal = snap != null ? readLeaf(targetPath, targetData) : null;
                 result = manipulator.modify(context, targetData, targetPath, src);
                 if (result == 0) {
                     throw ERROR_MERGE_UNCHANGED.create();
                 }
+                newVal = snap != null ? readLeaf(targetPath, targetData) : null;
             } catch (CommandSyntaxException e) {
                 return CompletableFuture.<Integer>failedFuture(e);
             }
-            return target.setDataAsync(targetData).thenApply(v -> result);
+            return target.setDataAsync(targetData).thenApply(v -> {
+                interceptEntityWrite(snap, target, targetPath, newVal, oldVal);
+                return result;
+            });
         })).whenComplete((result, ex) -> RegionCommandExecutor.runOnSource(sourceStack, () -> {
             if (ex != null) {
                 sourceStack.sendFailure(errorComponent(ex));
@@ -396,16 +515,20 @@ public class DataCommands {
 
     private static int removeData(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path) {
         final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+        // EXP6: capture the PhaseSnapshot on the home thread (see manipulateData).
+        final PhaseSnapshot snap = ExpChainSupport.getPhaseSnapshot();
 
         // EXP5 P0#3: same-region fast path.
         if (data.isDone()) {
             try {
                 final CompoundTag result = data.join();
+                final Object oldVal = snap != null ? readLeaf(path, result) : null;
                 final int count = path.remove(result);
                 if (count == 0) {
                     throw ERROR_MERGE_UNCHANGED.create();
                 }
                 accessor.setData(result);
+                interceptEntityWrite(snap, accessor, path, EntityLayer.REMOVED, oldVal);
                 source.sendSuccess(() -> accessor.getModifiedSuccess(), true);
                 return count;
             } catch (CompletionException | CommandSyntaxException e) {
@@ -416,7 +539,9 @@ public class DataCommands {
 
         data.thenCompose(result -> {
             final int count;
+            final Object oldVal;
             try {
+                oldVal = snap != null ? readLeaf(path, result) : null;
                 count = path.remove(result);
                 if (count == 0) {
                     throw ERROR_MERGE_UNCHANGED.create();
@@ -424,7 +549,10 @@ public class DataCommands {
             } catch (CommandSyntaxException e) {
                 return CompletableFuture.<Integer>failedFuture(e);
             }
-            return accessor.setDataAsync(result).thenApply(v -> count);
+            return accessor.setDataAsync(result).thenApply(v -> {
+                interceptEntityWrite(snap, accessor, path, EntityLayer.REMOVED, oldVal);
+                return count;
+            });
         }).whenComplete((count, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
             if (ex != null) {
                 source.sendFailure(errorComponent(ex));
@@ -452,11 +580,14 @@ public class DataCommands {
 
     private static int getData(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path) {
         final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+        // EXP6: capture the PhaseSnapshot on the home thread (see manipulateData).
+        final PhaseSnapshot snap = ExpChainSupport.getPhaseSnapshot();
 
         // EXP5 P0#3: same-region fast path — exact value for /execute store etc.
         if (data.isDone()) {
             try {
                 final Tag tag = getSingleTag(path, data.join());
+                interceptEntityRead(snap, accessor, path, tag);
                 final int result = switch (tag) {
                     case NumericTag numericTag -> Mth.floor(numericTag.doubleValue());
                     case CollectionTag collectionTag -> collectionTag.size();
@@ -473,36 +604,56 @@ public class DataCommands {
             }
         }
 
-        data.whenComplete((d, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
-            if (ex != null) {
-                source.sendFailure(errorComponent(ex));
-                return;
+        data.whenComplete((d, ex) -> {
+            Tag tag = null;
+            CommandSyntaxException resolveError = null;
+            if (ex == null) {
+                try {
+                    tag = getSingleTag(path, d);
+                    interceptEntityRead(snap, accessor, path, tag);
+                } catch (CommandSyntaxException e) {
+                    resolveError = e;
+                }
             }
-            try {
-                Tag tag = getSingleTag(path, d);
-                int result = switch (tag) {
-                    case NumericTag numericTag -> Mth.floor(numericTag.doubleValue());
-                    case CollectionTag collectionTag -> collectionTag.size();
-                    case CompoundTag compoundTag -> compoundTag.size();
-                    case StringTag(String s) -> s.length();
-                    case EndTag ignored -> throw ERROR_GET_NON_EXISTENT.create(path.toString());
-                    default -> throw new MatchException(null, null);
-                };
-                source.sendSuccess(() -> accessor.getPrintSuccess(tag), false);
-            } catch (CommandSyntaxException e) {
-                source.sendFailure(ComponentUtils.fromMessage(e.getRawMessage()));
-            }
-        }));
+            final Tag resolvedTag = tag;
+            final CommandSyntaxException finalError = resolveError;
+            RegionCommandExecutor.runOnSource(source, () -> {
+                if (ex != null) {
+                    source.sendFailure(errorComponent(ex));
+                    return;
+                }
+                if (finalError != null) {
+                    source.sendFailure(ComponentUtils.fromMessage(finalError.getRawMessage()));
+                    return;
+                }
+                try {
+                    int result = switch (resolvedTag) {
+                        case NumericTag numericTag -> Mth.floor(numericTag.doubleValue());
+                        case CollectionTag collectionTag -> collectionTag.size();
+                        case CompoundTag compoundTag -> compoundTag.size();
+                        case StringTag(String s) -> s.length();
+                        case EndTag ignored -> throw ERROR_GET_NON_EXISTENT.create(path.toString());
+                        default -> throw new MatchException(null, null);
+                    };
+                    source.sendSuccess(() -> accessor.getPrintSuccess(resolvedTag), false);
+                } catch (CommandSyntaxException e) {
+                    source.sendFailure(ComponentUtils.fromMessage(e.getRawMessage()));
+                }
+            });
+        });
         return 1;
     }
 
     private static int getNumeric(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path, final double scale) {
         final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+        // EXP6: capture the PhaseSnapshot on the home thread (see manipulateData).
+        final PhaseSnapshot snap = ExpChainSupport.getPhaseSnapshot();
 
         // EXP5 P0#3: same-region fast path.
         if (data.isDone()) {
             try {
                 final Tag tag = getSingleTag(path, data.join());
+                interceptEntityRead(snap, accessor, path, tag);
                 if (!(tag instanceof NumericTag)) {
                     throw ERROR_GET_NOT_NUMBER.create(path.toString());
                 }
@@ -515,22 +666,36 @@ public class DataCommands {
             }
         }
 
-        data.whenComplete((d, ex) -> RegionCommandExecutor.runOnSource(source, () -> {
-            if (ex != null) {
-                source.sendFailure(errorComponent(ex));
-                return;
-            }
-            try {
-                Tag tag = getSingleTag(path, d);
-                if (!(tag instanceof NumericTag)) {
-                    throw ERROR_GET_NOT_NUMBER.create(path.toString());
+        data.whenComplete((d, ex) -> {
+            Tag tag = null;
+            CommandSyntaxException resolveError = null;
+            if (ex == null) {
+                try {
+                    tag = getSingleTag(path, d);
+                    interceptEntityRead(snap, accessor, path, tag);
+                } catch (CommandSyntaxException e) {
+                    resolveError = e;
                 }
-                int result = Mth.floor(((NumericTag) tag).doubleValue() * scale);
-                source.sendSuccess(() -> accessor.getPrintSuccess(path, scale, result), false);
-            } catch (CommandSyntaxException e) {
-                source.sendFailure(ComponentUtils.fromMessage(e.getRawMessage()));
             }
-        }));
+            final Tag resolvedTag = tag;
+            final CommandSyntaxException finalError = resolveError;
+            RegionCommandExecutor.runOnSource(source, () -> {
+                if (ex != null) {
+                    source.sendFailure(errorComponent(ex));
+                    return;
+                }
+                if (finalError != null) {
+                    source.sendFailure(ComponentUtils.fromMessage(finalError.getRawMessage()));
+                    return;
+                }
+                if (!(resolvedTag instanceof NumericTag)) {
+                    source.sendFailure(ComponentUtils.fromMessage(ERROR_GET_NOT_NUMBER.create(path.toString()).getRawMessage()));
+                    return;
+                }
+                int result = Mth.floor(((NumericTag) resolvedTag).doubleValue() * scale);
+                source.sendSuccess(() -> accessor.getPrintSuccess(path, scale, result), false);
+            });
+        });
         return 1;
     }
 
@@ -561,6 +726,8 @@ public class DataCommands {
 
     private static int mergeData(final CommandSourceStack source, final DataAccessor accessor, final CompoundTag nbt) {
         final CompletableFuture<CompoundTag> data = accessor.getDataAsync();
+        // EXP6: capture the PhaseSnapshot on the home thread (see manipulateData).
+        final PhaseSnapshot snap = ExpChainSupport.getPhaseSnapshot();
 
         // EXP5 P0#3: same-region fast path.
         if (data.isDone()) {
@@ -574,6 +741,7 @@ public class DataCommands {
                     throw ERROR_MERGE_UNCHANGED.create();
                 }
                 accessor.setData(result);
+                interceptEntityMergeWrite(snap, accessor, old, result);
                 source.sendSuccess(() -> accessor.getModifiedSuccess(), true);
                 return 1;
             } catch (CompletionException | CommandSyntaxException e) {
@@ -591,7 +759,10 @@ public class DataCommands {
                 if (old.equals(result)) {
                     throw ERROR_MERGE_UNCHANGED.create();
                 }
-                return accessor.setDataAsync(result);
+                return accessor.setDataAsync(result).thenApply(v -> {
+                    interceptEntityMergeWrite(snap, accessor, old, result);
+                    return null;
+                });
             } catch (CommandSyntaxException e) {
                 return CompletableFuture.<Void>failedFuture(e);
             }

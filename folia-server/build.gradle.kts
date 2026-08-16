@@ -269,11 +269,17 @@ tasks.register("buildFolia") {
         final com.azurebranches.command.Continuation cont,
         final com.azurebranches.command.PhaseSnapshot phaseSnap) {
 
-        // EXP5Plus P2: scoreboard & entity-NBT compensation must run on their
-        // owning threads (scoreboard = global tick). Run compensation async
-        // first, then chain block restore + replay. Compensation is
-        // best-effort and logs failures internally.
-        net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
+        // EXP5Plus P2: scoreboard compensation must run on the global tick
+        // thread (scoreboard is server-global data). EXP6: entity-NBT
+        // compensation must run per-entity on each entity's OWNING REGION
+        // thread — this fixes the P2 latent bug where it ran on the global
+        // tick thread. Run all compensation async first, then chain block
+        // restore + replay. Compensation is best-effort and logs failures
+        // internally.
+        final java.util.List<java.util.concurrent.CompletableFuture<Void>> compensationFutures =
+            new java.util.ArrayList<>(4);
+        compensationFutures.add(
+            net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
             try {
                 com.azurebranches.command.ScoreLayer.compensate(phaseSnap,
                     (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
@@ -285,15 +291,28 @@ tasks.register("buildFolia") {
             } catch (final Throwable t) {
                 System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
             }
-            try {
-                com.azurebranches.command.EntityLayer.compensate(phaseSnap,
-                    (entityId, path) -> readEntityNbtPath(level, entityId, path),
-                    (entityId, path, value) -> writeEntityNbtPath(level, entityId, path, value));
-            } catch (final Throwable t) {
-                System.err.println("[AzureBranches] entity-NBT compensation wiring failed: " + t.getMessage());
-            }
             return null;
-        }).handle((v, ex) -> null).thenRun(() -> {
+        }));
+        for (final int entityId : com.azurebranches.command.EntityLayer.entityIdsOf(phaseSnap)) {
+            final net.minecraft.world.entity.Entity targetEntity = level.getEntity(entityId);
+            if (targetEntity == null) {
+                continue;
+            }
+            compensationFutures.add(
+                net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(targetEntity, scheduled -> {
+                    try {
+                        com.azurebranches.command.EntityLayer.compensateFor(phaseSnap, entityId,
+                            (eid, path) -> readEntityNbtPath(level, eid, path),
+                            (eid, path, value) -> writeEntityNbtPath(level, eid, path, value));
+                    } catch (final Throwable t) {
+                        System.err.println("[AzureBranches] entity-NBT compensation wiring failed: " + t.getMessage());
+                    }
+                    return null;
+                }));
+        }
+        java.util.concurrent.CompletableFuture.allOf(
+            compensationFutures.toArray(new java.util.concurrent.CompletableFuture[0]))
+            .handle((v, ex) -> null).thenRun(() -> {
 
         final java.util.Map<Long, Object> oldStates = phaseSnap.getOldBlockStates();
         if (oldStates == null || oldStates.isEmpty()) {
@@ -386,7 +405,21 @@ tasks.register("buildFolia") {
             cont.remaining + cont.stepCount, phaseSnap);
     }
 
-    // EXP5 P0#2: entity-NBT path read/write helpers for EntityLayer compensation.
+    // EXP5 P0#2 / EXP6: entity-NBT path read/write helpers for EntityLayer
+    // compensation and read-set verification. These run on the entity's own
+    // region thread (EXP6: per-entity onEntityAsync dispatch). Supported path
+    // forms (matching EntityLayer keys):
+    //   "Health"  "Pos[0]"  "foo/bar"  "Inventory{Slot:0b}"  "Inventory{Slot:0b}/id"
+    private static Object leafOf(final net.minecraft.nbt.Tag value) {
+        if (value instanceof net.minecraft.nbt.NumericTag num) {
+            return num.box();
+        }
+        if (value instanceof net.minecraft.nbt.StringTag str) {
+            return str.value();
+        }
+        return value; // compound/list — compared structurally via equals()
+    }
+
     private static Object readEntityNbtPath(final ServerLevel level, final int entityId, final String path) {
         final net.minecraft.world.entity.Entity entity = level.getEntity(entityId);
         if (entity == null) {
@@ -394,24 +427,53 @@ tasks.register("buildFolia") {
         }
         final net.minecraft.nbt.CompoundTag tag =
             net.minecraft.advancements.criterion.NbtPredicate.getEntityTagToCompare(entity);
+        final int brace = path.indexOf('{');
         final int bracket = path.indexOf('[');
-        final String name = bracket >= 0 ? path.substring(0, bracket) : path;
-        final net.minecraft.nbt.Tag value;
+        if (brace >= 0) {
+            // Slot path: "Inventory{Slot:0b}[/sub]" — locate the list entry by
+            // its stable slot descriptor instead of a list index.
+            final int slash = path.indexOf('/', brace);
+            final String containerName = path.substring(0, brace);
+            final int eq = path.indexOf(':', brace);
+            final int closeBrace = path.indexOf('}', brace);
+            if (eq < 0 || closeBrace < 0) {
+                return null;
+            }
+            final String slotFieldName = path.substring(brace + 1, eq).trim();
+            final String slotValueRaw = path.substring(eq + 1, closeBrace).trim();
+            final net.minecraft.nbt.Tag listTag = tag.get(containerName);
+            if (listTag instanceof net.minecraft.nbt.ListTag list) {
+                for (final net.minecraft.nbt.Tag item : list) {
+                    if (item instanceof net.minecraft.nbt.CompoundTag compound
+                        && compound.get(slotFieldName) != null
+                        && compound.get(slotFieldName).toString().equals(slotValueRaw)) {
+                        if (slash >= 0) {
+                            return leafOf(compound.get(path.substring(slash + 1)));
+                        }
+                        return compound.copy();
+                    }
+                }
+            }
+            return null;
+        }
         if (bracket >= 0) {
+            // Vector path: "Pos[0]"
             final int close = path.indexOf(']', bracket);
+            final String name = path.substring(0, bracket);
             final int idx = Integer.parseInt(path.substring(bracket + 1, close));
             final net.minecraft.nbt.Tag listTag = tag.get(name);
-            value = (listTag instanceof net.minecraft.nbt.ListTag list) ? list.get(idx) : null;
-        } else {
-            value = tag.get(name);
+            return (listTag instanceof net.minecraft.nbt.ListTag list) ? leafOf(list.get(idx)) : null;
         }
-        if (value instanceof net.minecraft.nbt.NumericTag num) {
-            return num.box();
+        final int slash = path.indexOf('/');
+        if (slash >= 0) {
+            // Compound sub-field: "foo/bar"
+            final net.minecraft.nbt.Tag sub = tag.get(path.substring(0, slash));
+            if (sub instanceof net.minecraft.nbt.CompoundTag compound) {
+                return leafOf(compound.get(path.substring(slash + 1)));
+            }
+            return null;
         }
-        if (value instanceof net.minecraft.nbt.StringTag str) {
-            return str.asString().orElse(null);
-        }
-        return value;
+        return leafOf(tag.get(path));
     }
 
     private static void writeEntityNbtPath(final ServerLevel level, final int entityId, final String path, final Object value) {
@@ -422,21 +484,68 @@ tasks.register("buildFolia") {
         final net.minecraft.nbt.CompoundTag tag =
             net.minecraft.advancements.criterion.NbtPredicate.getEntityTagToCompare(entity);
         final net.minecraft.nbt.Tag converted = toNbtTag(value);
+        final java.util.UUID uuid = entity.getUUID();
+        final int brace = path.indexOf('{');
         final int bracket = path.indexOf('[');
-        final String name = bracket >= 0 ? path.substring(0, bracket) : path;
-        if (bracket >= 0) {
+        if (brace >= 0) {
+            // Slot path: "Inventory{Slot:0b}[/sub]"
+            final int slash = path.indexOf('/', brace);
+            final String containerName = path.substring(0, brace);
+            final int eq = path.indexOf(':', brace);
+            final int closeBrace = path.indexOf('}', brace);
+            if (eq < 0 || closeBrace < 0) {
+                return;
+            }
+            final String slotFieldName = path.substring(brace + 1, eq).trim();
+            final String slotValueRaw = path.substring(eq + 1, closeBrace).trim();
+            final net.minecraft.nbt.Tag listTag = tag.get(containerName);
+            if (listTag instanceof net.minecraft.nbt.ListTag list) {
+                int found = -1;
+                for (int i = 0; i < list.size() && found < 0; i++) {
+                    final net.minecraft.nbt.Tag item = list.get(i);
+                    if (item instanceof net.minecraft.nbt.CompoundTag compound
+                        && compound.get(slotFieldName) != null
+                        && compound.get(slotFieldName).toString().equals(slotValueRaw)) {
+                        found = i;
+                    }
+                }
+                if (found >= 0) {
+                    if (slash >= 0) {
+                        final net.minecraft.nbt.CompoundTag copy = list.getCompoundOrEmpty(found).copy();
+                        copy.put(path.substring(slash + 1), converted);
+                        list.set(found, copy);
+                    } else if (converted instanceof net.minecraft.nbt.CompoundTag replacement) {
+                        list.set(found, replacement);
+                    }
+                } else if (slash < 0 && converted instanceof net.minecraft.nbt.CompoundTag replacement) {
+                    // The slot entry was removed — re-append it; the Slot value
+                    // inside the compound preserves the semantic slot identity.
+                    list.add(replacement.copy());
+                }
+            }
+        } else if (bracket >= 0) {
             final int close = path.indexOf(']', bracket);
+            final String name = path.substring(0, bracket);
             final int idx = Integer.parseInt(path.substring(bracket + 1, close));
             final net.minecraft.nbt.Tag listTag = tag.get(name);
             if (listTag instanceof net.minecraft.nbt.ListTag list) {
                 list.set(idx, converted);
             }
         } else {
-            tag.put(name, converted);
+            final int slash = path.indexOf('/');
+            if (slash >= 0) {
+                final net.minecraft.nbt.Tag sub = tag.get(path.substring(0, slash));
+                if (sub instanceof net.minecraft.nbt.CompoundTag compound) {
+                    compound.put(path.substring(slash + 1), converted);
+                }
+            } else {
+                tag.put(path, converted);
+            }
         }
         try (net.minecraft.util.ProblemReporter.ScopedCollector reporter =
                  new net.minecraft.util.ProblemReporter.ScopedCollector(entity.problemPath(), com.mojang.logging.LogUtils.getLogger())) {
             entity.load(net.minecraft.world.level.storage.TagValueInput.create(reporter, entity.registryAccess(), tag));
+            entity.setUUID(uuid);
         }
     }
 
@@ -496,9 +605,12 @@ tasks.register("buildFolia") {
 
         final java.util.Map<Long, Object> readValues = phaseSnap.getReadSetValues();
         final java.util.Map<String, Integer> scoreReadValues = phaseSnap.getScoreReadSetValues();
+        final java.util.Map<String, Object> nbtReadValues = phaseSnap.getNbtReadSetValues();
         final boolean hasBlockReads = readValues != null && !readValues.isEmpty();
         final boolean hasScoreReads = scoreReadValues != null && !scoreReadValues.isEmpty();
-        if (!hasBlockReads && !hasScoreReads) {
+        final boolean hasNbtReads = nbtReadValues != null && !nbtReadValues.isEmpty();
+        final java.util.Map<String, Boolean> modifiedNbt = new java.util.concurrent.ConcurrentHashMap<>();
+        if (!hasBlockReads && !hasScoreReads && !hasNbtReads) {
             com.azurebranches.command.ExpChainSupport.onValidationPassed();
             commitDeferredActions(level, phaseSnap);
             walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
@@ -555,6 +667,54 @@ tasks.register("buildFolia") {
             }
         }
 
+        // EXP6: verify the entity-NBT read-set against live entities, grouped
+        // by entity and dispatched onto each entity's owning region thread.
+        if (hasNbtReads) {
+            final java.util.Map<Integer, java.util.List<java.util.Map.Entry<String, Object>>> nbtByEntity =
+                new java.util.HashMap<>();
+            for (final java.util.Map.Entry<String, Object> entry : nbtReadValues.entrySet()) {
+                final int colon = entry.getKey().indexOf(':');
+                if (colon < 0) {
+                    continue;
+                }
+                final int entityId;
+                try {
+                    entityId = Integer.parseInt(entry.getKey().substring(0, colon));
+                } catch (final NumberFormatException e) {
+                    continue;
+                }
+                nbtByEntity.computeIfAbsent(entityId, k -> new java.util.ArrayList<>()).add(entry);
+            }
+            for (final java.util.Map.Entry<Integer, java.util.List<java.util.Map.Entry<String, Object>>> e : nbtByEntity.entrySet()) {
+                final int entityId = e.getKey();
+                final java.util.List<java.util.Map.Entry<String, Object>> entries = e.getValue();
+                final net.minecraft.world.entity.Entity checkEntity = level.getEntity(entityId);
+                if (checkEntity == null) {
+                    // The entity vanished after our read — treat as conflict.
+                    for (final java.util.Map.Entry<String, Object> entry : entries) {
+                        modifiedNbt.put(entry.getKey(), Boolean.TRUE);
+                    }
+                    continue;
+                }
+                final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
+                net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(checkEntity, scheduled -> {
+                    try {
+                        for (final java.util.Map.Entry<String, Object> entry : entries) {
+                            final int colon = entry.getKey().indexOf(':');
+                            final String path = entry.getKey().substring(colon + 1);
+                            final Object live = readEntityNbtPath(level, entityId, path);
+                            final Object expected = entry.getValue();
+                            modifiedNbt.put(entry.getKey(), !java.util.Objects.equals(live, expected));
+                        }
+                    } finally {
+                        done.complete(null);
+                    }
+                    return null;
+                });
+                checks.add(done);
+            }
+        }
+
         java.util.concurrent.CompletableFuture.allOf(
             checks.toArray(new java.util.concurrent.CompletableFuture[0]))
             .whenComplete((v, ex) ->
@@ -565,7 +725,7 @@ tasks.register("buildFolia") {
                             return;
                         }
                         final com.azurebranches.command.PhaseValidator.ValidationResult result =
-                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified, modifiedScores);
+                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified, modifiedScores, modifiedNbt);
                         switch (result) {
                             case COMMIT -> {
                                 com.azurebranches.command.ExpChainSupport.onValidationPassed();
@@ -860,7 +1020,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP5Plus.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP6.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

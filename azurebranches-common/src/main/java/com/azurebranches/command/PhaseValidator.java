@@ -14,6 +14,10 @@
  *                     modified between the tick they were read and now?
  *                     (Prevents Non-Repeatable Score Reads — EXP4)
  *
+ *   CHECK_NBT_READ_SET: Were any entity-NBT keys in the nbtReadSet externally
+ *                     modified between the read and now?
+ *                     (Prevents Non-Repeatable NBT Reads — EXP6)
+ *
  *   CHECK_WRITE_SET: Were any positions in the writeSet concurrently
  *                    modified by another chain? (Prevents Lost Updates)
  *                    Note: this is largely handled by ChainHead.traversalId
@@ -146,6 +150,29 @@ public final class PhaseValidator {
         final Map<Long, Boolean> externalCheckResults,
         final Map<String, Boolean> externalScoreCheckResults
     ) {
+        return validate(snap, retryCount, externalCheckResults, externalScoreCheckResults, null);
+    }
+
+    /**
+     * Validate a Phase's readSet, scoreReadSet and NBT read-set against
+     * external modification results (EXP6: full OCC with entity-NBT support).
+     *
+     * @param snap                      the PhaseSnapshot to validate
+     * @param retryCount                how many times this Phase has already been retried
+     * @param externalCheckResults      positions → true if externally modified
+     * @param externalScoreCheckResults score keys → true if externally modified (EXP4),
+     *                                  or null to skip score validation
+     * @param externalNbtCheckResults   NBT keys → true if externally modified (EXP6),
+     *                                  or null to skip NBT validation
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults,
+        final Map<String, Boolean> externalScoreCheckResults,
+        final Map<String, Boolean> externalNbtCheckResults
+    ) {
         if (!isEnabled()) {
             return ValidationResult.COMMIT; // bypass when disabled
         }
@@ -195,6 +222,22 @@ public final class PhaseValidator {
             }
         }
 
+        // CHECK_NBT_READ_SET: detect non-repeatable entity-NBT reads (EXP6)
+        if (externalNbtCheckResults != null && !externalNbtCheckResults.isEmpty()) {
+            final Map<String, Long> nbtReadSet = snap.getNbtReadSet();
+            if (nbtReadSet != null) {
+                for (final Map.Entry<String, Long> entry : nbtReadSet.entrySet()) {
+                    final String key = entry.getKey();
+                    final Boolean externallyModified = externalNbtCheckResults.get(key);
+                    if (Boolean.TRUE.equals(externallyModified)) {
+                        // This NBT key was modified externally between the read
+                        // and now → our read is stale → Phase must retry
+                        return ValidationResult.RETRY;
+                    }
+                }
+            }
+        }
+
         // CHECK_WRITE_SET: handled by ChainHead.traversalId supersede
         // (newer traversal automatically invalidates older Continuations).
         // No additional check needed here.
@@ -215,7 +258,7 @@ public final class PhaseValidator {
         }
         return "EXP3 OCC validation: maxReadSet=" + maxReadSetSize()
             + ", maxRetries=" + maxRetries()
-            + " (+ EXP4 score read-set)";
+            + " (+ EXP4 score read-set, EXP6 NBT read-set)";
     }
 
     private PhaseValidator() {}

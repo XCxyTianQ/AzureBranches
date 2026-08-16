@@ -35,8 +35,10 @@
  *                    → conflict? rollback + retry. no conflict? commit + resume.
  *
  * Thread safety:
- *   PhaseSnapshot is strictly thread-confined to the home region thread during
- *   Walking. No synchronization is needed.
+ *   Block/score layers are thread-confined to the home region thread during
+ *   Walking. The NBT layer (EXP6) is additionally captured from the entity
+ *   region threads that materialize /data values, so the four NBT maps use
+ *   ConcurrentHashMap and tolerate concurrent capture + validation reads.
  *
  * Zero Minecraft-internal imports by design — all block state references are
  * stored as java.lang.Object.
@@ -50,6 +52,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class PhaseSnapshot {
 
@@ -98,6 +101,13 @@ public final class PhaseSnapshot {
 
     /** NBT read-set for OCC validation: composite-key → tick. */
     private final Map<String, Long> nbtReadSet;
+
+    /**
+     * EXP6: The NBT value actually observed at each read position, captured
+     * at read time. This is what OCC validation compares against the live
+     * entity to detect a non-repeatable NBT read.
+     */
+    private final Map<String, Object> nbtReadSetValues;
 
     // ================================================================
     //  EXP4: DeferredAction queue (entity lifecycle WAL)
@@ -164,9 +174,10 @@ public final class PhaseSnapshot {
         this.pendingScoreKeys = new HashSet<>();
         this.scoreReadSet = new HashMap<>();
         this.scoreReadSetValues = new HashMap<>();
-        this.nbtCache = new HashMap<>();
-        this.nbtOldValues = new HashMap<>();
-        this.nbtReadSet = new HashMap<>();
+        this.nbtCache = new ConcurrentHashMap<>();
+        this.nbtOldValues = new ConcurrentHashMap<>();
+        this.nbtReadSet = new ConcurrentHashMap<>();
+        this.nbtReadSetValues = new ConcurrentHashMap<>();
         this.deferredActions = new java.util.ArrayList<>(8);
         this.nextVirtualId = -1;
         this.snapshotTick = tick;
@@ -372,8 +383,8 @@ public final class PhaseSnapshot {
      */
     public void putNbt(final String key, final Object newVal, final Object oldVal) {
         nbtCache.put(key, newVal);
-        if (oldVal != null && !nbtOldValues.containsKey(key)) {
-            nbtOldValues.put(key, oldVal);
+        if (oldVal != null) {
+            nbtOldValues.putIfAbsent(key, oldVal);
         }
     }
 
@@ -391,9 +402,25 @@ public final class PhaseSnapshot {
         nbtReadSet.putIfAbsent(key, tick);
     }
 
+    /**
+     * Record an NBT read for OCC validation, retaining the value observed.
+     * @param key   composite key from EntityLayer.nbtKey()
+     * @param value value seen at read time (may be null)
+     * @param tick  current game tick at read time
+     */
+    public void recordNbtRead(final String key, final Object value, final long tick) {
+        nbtReadSet.putIfAbsent(key, tick);
+        nbtReadSetValues.putIfAbsent(key, value);
+    }
+
     /** Get the NBT read-set for OCC validation. */
     public Map<String, Long> getNbtReadSet() {
         return nbtReadSet;
+    }
+
+    /** Get the NBT values captured with the read-set (EXP6 validation). */
+    public Map<String, Object> getNbtReadSetValues() {
+        return nbtReadSetValues;
     }
 
     /** Return all keys modified in this Phase (for compensation iteration). */
@@ -619,6 +646,7 @@ public final class PhaseSnapshot {
         scoreReadSetValues.clear();
         nbtCache.clear();
         nbtReadSet.clear();
+        nbtReadSetValues.clear();
         deferredActions.clear();
         nextVirtualId = -1;
     }

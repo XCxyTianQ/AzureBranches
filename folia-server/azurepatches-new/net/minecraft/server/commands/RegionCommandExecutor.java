@@ -89,16 +89,32 @@ public final class RegionCommandExecutor {
         return future;
     }
 
-    /** Execute on the region owning the given entity, without blocking. */
+    /** Execute on the region owning the given entity, without blocking.
+     *
+     * <p>AzureBranches EXP6: when the calling thread IS the entity's owning
+     * tick thread, the task runs inline. Folia's entity scheduler queues to
+     * the entity's next tick even on its own thread (scheduleOrExecute only
+     * inlines during the entity's own tick stage), which silently broke the
+     * same-region fast path of {@code /data} inside command-block chains —
+     * every read/write would land one tick late. Running inline on the
+     * owning tick thread is safe by Folia's threading contract.</p> */
     public static <T> CompletableFuture<T> onEntityAsync(final Entity entity, final EntityTask<T> task) {
         final CompletableFuture<T> future = new CompletableFuture<>();
-        entity.getBukkitEntity().taskScheduler.scheduleOrExecute((Entity scheduled) -> {
+        if (TickThread.isTickThreadFor(entity)) {
             try {
-                future.complete(task.run(scheduled));
+                future.complete(task.run(entity));
             } catch (final Throwable t) {
                 future.completeExceptionally(t);
             }
-        });
+        } else {
+            entity.getBukkitEntity().taskScheduler.scheduleOrExecute((Entity scheduled) -> {
+                try {
+                    future.complete(task.run(scheduled));
+                } catch (final Throwable t) {
+                    future.completeExceptionally(t);
+                }
+            });
+        }
         return future;
     }
 
