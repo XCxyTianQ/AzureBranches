@@ -107,6 +107,30 @@ public final class Continuation {
      */
     public volatile int phaseStartDir;
 
+    /**
+     * EXP6Plus: Entity read-set carry (entityId -> scoreboardName) from the
+     * Phase that created this Continuation. Inherited by the next Phase's
+     * snapshot so CHECK_ENTITY_READ_SET still sees entities resolved by an
+     * earlier Phase of the same chain (an entity that dies mid-chain must
+     * conflict on the next verify).
+     */
+    public volatile java.util.Map<Integer, String> entityReadCarry;
+
+    /**
+     * EXP6Plus: Score write carry ("objective:holder" -> pre-write value)
+     * from the Phase that created this Continuation. Inherited so a later
+     * Phase's rollback compensates score writes of earlier Phases (chain =
+     * one transaction across Phases).
+     */
+    public volatile java.util.Map<String, Integer> oldScoreValuesCarry;
+
+    /**
+     * EXP6Plus: Score cache carry ("objective:holder" -> value after the
+     * dispatching Phase's writes). Inherited for inverse-operation
+     * compensation (netDelta = cachedNew - oldValue).
+     */
+    public volatile java.util.Map<String, Integer> scoreCacheCarry;
+
     Continuation(final long traversalId, final long cursorPos, final int direction3d,
                  final int remaining, final int stepCount) {
         this.traversalId = traversalId;

@@ -110,6 +110,26 @@ public final class PhaseSnapshot {
     private final Map<String, Object> nbtReadSetValues;
 
     // ================================================================
+    //  EXP6Plus: Scoreboard entity read-set
+    // ================================================================
+
+    /**
+     * EXP6Plus: Entities resolved by /scoreboard holder arguments (selectors,
+     * UUID lookups, player names) during this Phase: entityId → tick.
+     * OCC validation checks that each entity still exists at commit time —
+     * a holder whose entity died between resolution and validation means the
+     * Phase read a stale entity set (L1 phantom-read guard, existence bound).
+     */
+    private final Map<Integer, Long> entityReadSet;
+
+    /**
+     * EXP6Plus: The observed scoreboard identity (scoreboardName) of each
+     * resolved entity, for diagnostics and for the ghost-score guard at
+     * rollback (dead holders are skipped instead of recreating entries).
+     */
+    private final Map<Integer, String> entityReadSetValues;
+
+    // ================================================================
     //  EXP4: DeferredAction queue (entity lifecycle WAL)
     // ================================================================
 
@@ -178,6 +198,8 @@ public final class PhaseSnapshot {
         this.nbtOldValues = new ConcurrentHashMap<>();
         this.nbtReadSet = new ConcurrentHashMap<>();
         this.nbtReadSetValues = new ConcurrentHashMap<>();
+        this.entityReadSet = new ConcurrentHashMap<>();
+        this.entityReadSetValues = new ConcurrentHashMap<>();
         this.deferredActions = new java.util.ArrayList<>(8);
         this.nextVirtualId = -1;
         this.snapshotTick = tick;
@@ -202,6 +224,30 @@ public final class PhaseSnapshot {
             if (cont.oldStateCapture != null) {
                 for (final Map.Entry<Long, Object> e : cont.oldStateCapture.entrySet()) {
                     snap.oldBlockStates.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            // EXP6Plus: inherit the entity read-set (entityId -> scoreboard
+            // name) so a later Phase's validation still sees entities that an
+            // earlier Phase of the same chain resolved — an entity that dies
+            // mid-chain must trigger CHECK_ENTITY_READ_SET on the NEXT verify,
+            // not only on the verify of the Phase that resolved it.
+            if (cont.entityReadCarry != null) {
+                for (final Map.Entry<Integer, String> e : cont.entityReadCarry.entrySet()) {
+                    snap.entityReadSet.putIfAbsent(e.getKey(), tick);
+                    snap.entityReadSetValues.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            // EXP6Plus: inherit score write/read state so a later Phase's
+            // rollback compensates score writes from earlier Phases of the
+            // same chain (chain = one transaction across Phases).
+            if (cont.oldScoreValuesCarry != null) {
+                for (final Map.Entry<String, Integer> e : cont.oldScoreValuesCarry.entrySet()) {
+                    snap.oldScoreValues.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            if (cont.scoreCacheCarry != null) {
+                for (final Map.Entry<String, Integer> e : cont.scoreCacheCarry.entrySet()) {
+                    snap.scoreCache.putIfAbsent(e.getKey(), e.getValue());
                 }
             }
         }
@@ -364,6 +410,15 @@ public final class PhaseSnapshot {
     public int scoreCacheSize() { return scoreCache.size(); }
     public int scoreReadSetCount() { return scoreReadSet.size(); }
 
+    /**
+     * EXP6Plus: Full score cache (key → value after this Phase's writes).
+     * Carried across Phase boundaries so a later Phase's rollback can
+     * compensate score writes made by earlier Phases of the same chain.
+     */
+    public Map<String, Integer> getScoreCache() {
+        return scoreCache;
+    }
+
     // ================================================================
     //  EXP4: Entity NBT cache (backing store for EntityLayer)
     // ================================================================
@@ -421,6 +476,31 @@ public final class PhaseSnapshot {
     /** Get the NBT values captured with the read-set (EXP6 validation). */
     public Map<String, Object> getNbtReadSetValues() {
         return nbtReadSetValues;
+    }
+
+    /**
+     * EXP6Plus: Record an entity resolved by a /scoreboard holder argument
+     * into the entity read-set, retaining its scoreboard identity.
+     *
+     * @param entityId       the entity's network ID
+     * @param scoreboardName the observed scoreboardName (identity value)
+     * @param tick           current game tick at resolution time
+     */
+    public void recordEntityRead(final int entityId, final String scoreboardName, final long tick) {
+        entityReadSet.putIfAbsent(entityId, tick);
+        if (scoreboardName != null) {
+            entityReadSetValues.putIfAbsent(entityId, scoreboardName);
+        }
+    }
+
+    /** Get the entity read-set (entityId → tick) for EXP6Plus validation. */
+    public Map<Integer, Long> getEntityReadSet() {
+        return entityReadSet;
+    }
+
+    /** Get the observed scoreboard identities of resolved entities. */
+    public Map<Integer, String> getEntityReadSetValues() {
+        return entityReadSetValues;
     }
 
     /** Return all keys modified in this Phase (for compensation iteration). */
@@ -647,6 +727,8 @@ public final class PhaseSnapshot {
         nbtCache.clear();
         nbtReadSet.clear();
         nbtReadSetValues.clear();
+        entityReadSet.clear();
+        entityReadSetValues.clear();
         deferredActions.clear();
         nextVirtualId = -1;
     }

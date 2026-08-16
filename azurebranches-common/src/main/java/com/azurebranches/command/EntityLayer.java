@@ -403,6 +403,33 @@ public final class EntityLayer {
     }
 
     /**
+     * EXP6Plus: Record an entity resolved by a /scoreboard holder argument
+     * into the PhaseSnapshot entity read-set.
+     *
+     * <p>Scoreboard holders resolved to entities (selectors, UUID lookups,
+     * player names) form a read of the live entity set; validation re-checks
+     * each entity's existence at commit time (phantom-read guard), and
+     * rollback compensation uses the recorded identities to skip dead
+     * holders instead of recreating ghost score entries.</p>
+     *
+     * @param snap           the current PhaseSnapshot (may be null)
+     * @param entityId       the entity's network ID
+     * @param scoreboardName the observed scoreboardName
+     * @param tick           current game tick at resolution time
+     */
+    public static void recordEntityRead(
+        final PhaseSnapshot snap,
+        final int entityId,
+        final String scoreboardName,
+        final long tick
+    ) {
+        if (snap == null) {
+            return;
+        }
+        snap.recordEntityRead(entityId, scoreboardName, tick);
+    }
+
+    /**
      * EXP6: Collect the distinct entity IDs referenced by this Phase's NBT
      * keys, so the caller can dispatch compensation/validation per entity
      * onto each entity's owning region thread.

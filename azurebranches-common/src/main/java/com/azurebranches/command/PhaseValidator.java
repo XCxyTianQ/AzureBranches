@@ -18,6 +18,10 @@
  *                     modified between the read and now?
  *                     (Prevents Non-Repeatable NBT Reads — EXP6)
  *
+ *   CHECK_ENTITY_READ_SET: Did any entity resolved by a /scoreboard holder
+ *                     argument disappear between resolution and now?
+ *                     (Prevents holder-set phantom reads — EXP6Plus)
+ *
  *   CHECK_WRITE_SET: Were any positions in the writeSet concurrently
  *                    modified by another chain? (Prevents Lost Updates)
  *                    Note: this is largely handled by ChainHead.traversalId
@@ -173,6 +177,34 @@ public final class PhaseValidator {
         final Map<String, Boolean> externalScoreCheckResults,
         final Map<String, Boolean> externalNbtCheckResults
     ) {
+        return validate(snap, retryCount, externalCheckResults, externalScoreCheckResults,
+            externalNbtCheckResults, null);
+    }
+
+    /**
+     * Validate a Phase's readSet, scoreReadSet, NBT read-set and entity
+     * read-set against external modification results (EXP6Plus: full OCC
+     * with scoreboard entity-dimension support).
+     *
+     * @param snap                       the PhaseSnapshot to validate
+     * @param retryCount                 how many times this Phase has already been retried
+     * @param externalCheckResults       positions → true if externally modified
+     * @param externalScoreCheckResults  score keys → true if externally modified (EXP4),
+     *                                   or null to skip score validation
+     * @param externalNbtCheckResults    NBT keys → true if externally modified (EXP6),
+     *                                   or null to skip NBT validation
+     * @param externalEntityCheckResults entity IDs → true if the entity disappeared (EXP6Plus),
+     *                                   or null to skip entity validation
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults,
+        final Map<String, Boolean> externalScoreCheckResults,
+        final Map<String, Boolean> externalNbtCheckResults,
+        final Map<Integer, Boolean> externalEntityCheckResults
+    ) {
         if (!isEnabled()) {
             return ValidationResult.COMMIT; // bypass when disabled
         }
@@ -232,6 +264,23 @@ public final class PhaseValidator {
                     if (Boolean.TRUE.equals(externallyModified)) {
                         // This NBT key was modified externally between the read
                         // and now → our read is stale → Phase must retry
+                        return ValidationResult.RETRY;
+                    }
+                }
+            }
+        }
+
+        // CHECK_ENTITY_READ_SET: detect holder-set phantom reads (EXP6Plus)
+        if (externalEntityCheckResults != null && !externalEntityCheckResults.isEmpty()) {
+            final Map<Integer, Long> entityReadSet = snap.getEntityReadSet();
+            if (entityReadSet != null) {
+                for (final Map.Entry<Integer, Long> entry : entityReadSet.entrySet()) {
+                    final Integer entityId = entry.getKey();
+                    final Boolean disappeared = externalEntityCheckResults.get(entityId);
+                    if (Boolean.TRUE.equals(disappeared)) {
+                        // The entity resolved by a scoreboard holder argument
+                        // vanished between resolution and now → our holder set
+                        // is stale → Phase must retry
                         return ValidationResult.RETRY;
                     }
                 }

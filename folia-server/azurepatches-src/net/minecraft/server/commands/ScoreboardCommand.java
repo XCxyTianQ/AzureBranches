@@ -230,10 +230,16 @@ public class ScoreboardCommand {
                                     Commands.argument("target", ScoreHolderArgument.scoreHolder())
                                         .suggests(ScoreHolderArgument.SUGGEST_SCORE_HOLDERS)
                                         .executes(
-                                            c -> dispatch(
-                                                c.getSource(),
-                                                () -> listTrackedPlayerScores(c.getSource(), ScoreHolderArgument.getName(c, "target"))
-                                            )
+                                            c -> {
+                                                // AzureBranches EXP6Plus: resolve the holder on the
+                                                // source thread — entity iteration is region data and
+                                                // is not safe on the global tick thread.
+                                                final ScoreHolder target = ScoreHolderArgument.getName(c, "target");
+                                                return dispatch(
+                                                    c.getSource(),
+                                                    () -> listTrackedPlayerScores(c.getSource(), target)
+                                                );
+                                            }
                                         )
                                 )
                         )
@@ -247,15 +253,19 @@ public class ScoreboardCommand {
                                                 .then(
                                                     Commands.argument("score", IntegerArgumentType.integer())
                                                         .executes(
-                                                            c -> dispatch(
-                                                                c.getSource(),
-                                                                () -> setScore(
+                                                            c -> {
+                                                                final Collection<ScoreHolder> targets =
+                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                                return dispatch(
                                                                     c.getSource(),
-                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                    ObjectiveArgument.getWritableObjective(c, "objective"),
-                                                                    IntegerArgumentType.getInteger(c, "score")
-                                                                )
-                                                            )
+                                                                    () -> setScore(
+                                                                        c.getSource(),
+                                                                        targets,
+                                                                        ObjectiveArgument.getWritableObjective(c, "objective"),
+                                                                        IntegerArgumentType.getInteger(c, "score")
+                                                                    )
+                                                                );
+                                                            }
                                                         )
                                                 )
                                         )
@@ -269,12 +279,15 @@ public class ScoreboardCommand {
                                         .then(
                                             Commands.argument("objective", ObjectiveArgument.objective())
                                                 .executes(
-                                                    c -> dispatch(
-                                                        c.getSource(),
-                                                        () -> getScore(
-                                                            c.getSource(), ScoreHolderArgument.getName(c, "target"), ObjectiveArgument.getObjective(c, "objective")
-                                                        )
-                                                    )
+                                                    c -> {
+                                                        final ScoreHolder target = ScoreHolderArgument.getName(c, "target");
+                                                        return dispatch(
+                                                            c.getSource(),
+                                                            () -> getScore(
+                                                                c.getSource(), target, ObjectiveArgument.getObjective(c, "objective")
+                                                            )
+                                                        );
+                                                    }
                                                 )
                                         )
                                 )
@@ -289,15 +302,19 @@ public class ScoreboardCommand {
                                                 .then(
                                                     Commands.argument("score", IntegerArgumentType.integer(0))
                                                         .executes(
-                                                            c -> dispatch(
-                                                                c.getSource(),
-                                                                () -> addScore(
+                                                            c -> {
+                                                                final Collection<ScoreHolder> targets =
+                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                                return dispatch(
                                                                     c.getSource(),
-                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                    ObjectiveArgument.getWritableObjective(c, "objective"),
-                                                                    IntegerArgumentType.getInteger(c, "score")
-                                                                )
-                                                            )
+                                                                    () -> addScore(
+                                                                        c.getSource(),
+                                                                        targets,
+                                                                        ObjectiveArgument.getWritableObjective(c, "objective"),
+                                                                        IntegerArgumentType.getInteger(c, "score")
+                                                                    )
+                                                                );
+                                                            }
                                                         )
                                                 )
                                         )
@@ -313,15 +330,19 @@ public class ScoreboardCommand {
                                                 .then(
                                                     Commands.argument("score", IntegerArgumentType.integer(0))
                                                         .executes(
-                                                            c -> dispatch(
-                                                                c.getSource(),
-                                                                () -> removeScore(
+                                                            c -> {
+                                                                final Collection<ScoreHolder> targets =
+                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                                return dispatch(
                                                                     c.getSource(),
-                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                    ObjectiveArgument.getWritableObjective(c, "objective"),
-                                                                    IntegerArgumentType.getInteger(c, "score")
-                                                                )
-                                                            )
+                                                                    () -> removeScore(
+                                                                        c.getSource(),
+                                                                        targets,
+                                                                        ObjectiveArgument.getWritableObjective(c, "objective"),
+                                                                        IntegerArgumentType.getInteger(c, "score")
+                                                                    )
+                                                                );
+                                                            }
                                                         )
                                                 )
                                         )
@@ -333,22 +354,30 @@ public class ScoreboardCommand {
                                     Commands.argument("targets", ScoreHolderArgument.scoreHolders())
                                         .suggests(ScoreHolderArgument.SUGGEST_SCORE_HOLDERS)
                                         .executes(
-                                            c -> dispatch(
-                                                c.getSource(),
-                                                () -> resetScores(c.getSource(), ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"))
-                                            )
+                                            c -> {
+                                                final Collection<ScoreHolder> targets =
+                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                return dispatch(
+                                                    c.getSource(),
+                                                    () -> resetScores(c.getSource(), targets)
+                                                );
+                                            }
                                         )
                                         .then(
                                             Commands.argument("objective", ObjectiveArgument.objective())
                                                 .executes(
-                                                    c -> dispatch(
-                                                        c.getSource(),
-                                                        () -> resetScore(
+                                                    c -> {
+                                                        final Collection<ScoreHolder> targets =
+                                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                        return dispatch(
                                                             c.getSource(),
-                                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                            ObjectiveArgument.getObjective(c, "objective")
-                                                        )
-                                                    )
+                                                            () -> resetScore(
+                                                                c.getSource(),
+                                                                targets,
+                                                                ObjectiveArgument.getObjective(c, "objective")
+                                                            )
+                                                        );
+                                                    }
                                                 )
                                         )
                                 )
@@ -364,14 +393,18 @@ public class ScoreboardCommand {
                                                     (c, p) -> suggestTriggers(c.getSource(), ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"), p)
                                                 )
                                                 .executes(
-                                                    c -> dispatch(
-                                                        c.getSource(),
-                                                        () -> enableTrigger(
+                                                    c -> {
+                                                        final Collection<ScoreHolder> targets =
+                                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                        return dispatch(
                                                             c.getSource(),
-                                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                            ObjectiveArgument.getObjective(c, "objective")
-                                                        )
-                                                    )
+                                                            () -> enableTrigger(
+                                                                c.getSource(),
+                                                                targets,
+                                                                ObjectiveArgument.getObjective(c, "objective")
+                                                            )
+                                                        );
+                                                    }
                                                 )
                                         )
                                 )
@@ -388,27 +421,35 @@ public class ScoreboardCommand {
                                                         .then(
                                                             Commands.argument("name", ComponentArgument.textComponent(context))
                                                                 .executes(
-                                                                    c -> dispatch(
-                                                                        c.getSource(),
-                                                                        () -> setScoreDisplay(
+                                                                    c -> {
+                                                                        final Collection<ScoreHolder> targets =
+                                                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                                        return dispatch(
                                                                             c.getSource(),
-                                                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                            ObjectiveArgument.getObjective(c, "objective"),
-                                                                            ComponentArgument.getResolvedComponent(c, "name")
-                                                                        )
-                                                                    )
+                                                                            () -> setScoreDisplay(
+                                                                                c.getSource(),
+                                                                                targets,
+                                                                                ObjectiveArgument.getObjective(c, "objective"),
+                                                                                ComponentArgument.getResolvedComponent(c, "name")
+                                                                            )
+                                                                        );
+                                                                    }
                                                                 )
                                                         )
                                                         .executes(
-                                                            c -> dispatch(
-                                                                c.getSource(),
-                                                                () -> setScoreDisplay(
+                                                            c -> {
+                                                                final Collection<ScoreHolder> targets =
+                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                                return dispatch(
                                                                     c.getSource(),
-                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                    ObjectiveArgument.getObjective(c, "objective"),
-                                                                    null
-                                                                )
-                                                            )
+                                                                    () -> setScoreDisplay(
+                                                                        c.getSource(),
+                                                                        targets,
+                                                                        ObjectiveArgument.getObjective(c, "objective"),
+                                                                        null
+                                                                    )
+                                                                );
+                                                            }
                                                         )
                                                 )
                                         )
@@ -422,15 +463,19 @@ public class ScoreboardCommand {
                                                     addNumberFormats(
                                                         context,
                                                         Commands.argument("objective", ObjectiveArgument.objective()),
-                                                        (c, format) -> dispatch(
-                                                            c.getSource(),
-                                                            () -> setScoreNumberFormat(
+                                                        (c, format) -> {
+                                                            final Collection<ScoreHolder> targets =
+                                                                ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                            return dispatch(
                                                                 c.getSource(),
-                                                                ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                ObjectiveArgument.getObjective(c, "objective"),
-                                                                format
-                                                            )
-                                                        )
+                                                                () -> setScoreNumberFormat(
+                                                                    c.getSource(),
+                                                                    targets,
+                                                                    ObjectiveArgument.getObjective(c, "objective"),
+                                                                    format
+                                                                )
+                                                            );
+                                                        }
                                                     )
                                                 )
                                         )
@@ -451,17 +496,23 @@ public class ScoreboardCommand {
                                                                 .then(
                                                                     Commands.argument("sourceObjective", ObjectiveArgument.objective())
                                                                         .executes(
-                                                                            c -> dispatch(
-                                                                                c.getSource(),
-                                                                                () -> performOperation(
+                                                                            c -> {
+                                                                                final Collection<ScoreHolder> targets =
+                                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets");
+                                                                                final Collection<ScoreHolder> source =
+                                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "source");
+                                                                                return dispatch(
                                                                                     c.getSource(),
-                                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets"),
-                                                                                    ObjectiveArgument.getWritableObjective(c, "targetObjective"),
-                                                                                    OperationArgument.getOperation(c, "operation"),
-                                                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "source"),
-                                                                                    ObjectiveArgument.getObjective(c, "sourceObjective")
-                                                                                )
-                                                                            )
+                                                                                    () -> performOperation(
+                                                                                        c.getSource(),
+                                                                                        targets,
+                                                                                        ObjectiveArgument.getWritableObjective(c, "targetObjective"),
+                                                                                        OperationArgument.getOperation(c, "operation"),
+                                                                                        source,
+                                                                                        ObjectiveArgument.getObjective(c, "sourceObjective")
+                                                                                    )
+                                                                                );
+                                                                            }
                                                                         )
                                                                 )
                                                         )
@@ -486,6 +537,11 @@ public class ScoreboardCommand {
      * optimistic placeholder (1) is returned, and failures are reported back
      * on the source's region via {@code runOnSource} — matching the DataCommands
      * cross-region semantics.</p>
+     *
+     * <p>EXP6Plus: inside an EXP chain the registered global-tick future is
+     * now genuinely awaited by the walker's suspend step (the EXP6Plus
+     * walker transform drains {@code ctx.futures} into the suspend barrier),
+     * so the next command block always sees the landed mutation.</p>
      */
     private static int dispatch(final CommandSourceStack source, final RegionCommandExecutor.BlockTask<Integer> task) {
         // EXP5Plus P2: propagate the EXP chain's PhaseSnapshot onto the global

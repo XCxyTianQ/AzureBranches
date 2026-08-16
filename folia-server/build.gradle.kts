@@ -259,6 +259,22 @@ tasks.register("buildFolia") {
                     "            com.azurebranches.command.PhaseSnapshot.fromContinuation(cont, level.getGameTime());\n" +
                     "        verifyReadSetAndResume(head, level, headBlock, cont, resumePos, resumeDir, nextPhaseSnap);",
 
+                // EXP6Plus: cross-Phase carries must be captured AFTER the
+                // suspend barrier — the global-tick score write lands in the
+                // PhaseSnapshot during the suspend window, so copying at
+                // dispatch time would see an empty write state.
+                "                        head.removeContinuation(cont);\n" +
+                    "                        aggregateAndResume(head, level, headBlock, cont, firstBatchPos, batchRegistry);" to
+                    "                        // EXP6Plus: capture cross-Phase carries after the barrier\n" +
+                    "                        cont.entityReadCarry = currentPhaseSnap != null\n" +
+                    "                            ? new java.util.HashMap<>(currentPhaseSnap.getEntityReadSetValues()) : null;\n" +
+                    "                        cont.oldScoreValuesCarry = currentPhaseSnap != null\n" +
+                    "                            ? new java.util.HashMap<>(currentPhaseSnap.getOldScoreValues()) : null;\n" +
+                    "                        cont.scoreCacheCarry = currentPhaseSnap != null\n" +
+                    "                            ? new java.util.HashMap<>(currentPhaseSnap.getScoreCache()) : null;\n" +
+                    "                        head.removeContinuation(cont);\n" +
+                    "                        aggregateAndResume(head, level, headBlock, cont, firstBatchPos, batchRegistry);",
+
                 // EXP4: OCC rollback & retry — restore pre-write old states on the
                 // target regions, then replay the whole Phase from its start.
                 "    // AzureBranches end - EXP suspendable chain implementation (v2)" to
@@ -278,6 +294,19 @@ tasks.register("buildFolia") {
         // internally.
         final java.util.List<java.util.concurrent.CompletableFuture<Void>> compensationFutures =
             new java.util.ArrayList<>(4);
+        // EXP6Plus: ghost-score guard — collect the scoreboard identities of
+        // entities that already vanished, so score compensation never
+        // recreates a score entry for a dead entity (getOrCreatePlayerScore
+        // would silently resurrect a ghost holder).
+        final java.util.Set<String> deadHolderNames = new java.util.HashSet<>();
+        for (final java.util.Map.Entry<Integer, String> e : phaseSnap.getEntityReadSetValues().entrySet()) {
+            final net.minecraft.world.entity.Entity ghostCheck = level.getEntity(e.getKey());
+            // !isAlive() covers the death-animation window: the entity is
+            // dead but not yet discarded, so level.getEntity still returns it.
+            if (ghostCheck == null || !ghostCheck.isAlive()) {
+                deadHolderNames.add(e.getValue());
+            }
+        }
         compensationFutures.add(
             net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
             try {
@@ -285,9 +314,28 @@ tasks.register("buildFolia") {
                     (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
                         net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
                         level.getScoreboard().getObjective(objective)).get(),
-                    (objective, holder, value) -> level.getScoreboard().getOrCreatePlayerScore(
-                        net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
-                        level.getScoreboard().getObjective(objective)).set(value));
+                    (objective, holder, value) -> {
+                        if (deadHolderNames.contains(holder)) {
+                            // EXP6Plus ghost-score guard: the holder's entity
+                            // died. Folia disabled Scoreboard.entityRemoved
+                            // (ServerLevel comments the call out), so dead
+                            // entities' score entries survive on their own.
+                            // Emulate the vanilla clear instead of writing a
+                            // value back — never resurrect or refresh a ghost.
+                            com.azurebranches.command.ExpChainSupport.onScoreCompensationFailed();
+                            final net.minecraft.world.scores.Objective ghostObj =
+                                level.getScoreboard().getObjective(objective);
+                            if (ghostObj != null) {
+                                level.getScoreboard().resetSinglePlayerScore(
+                                    net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                                    ghostObj);
+                            }
+                            return;
+                        }
+                        level.getScoreboard().getOrCreatePlayerScore(
+                            net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                            level.getScoreboard().getObjective(objective)).set(value);
+                    });
             } catch (final Throwable t) {
                 System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
             }
@@ -606,11 +654,14 @@ tasks.register("buildFolia") {
         final java.util.Map<Long, Object> readValues = phaseSnap.getReadSetValues();
         final java.util.Map<String, Integer> scoreReadValues = phaseSnap.getScoreReadSetValues();
         final java.util.Map<String, Object> nbtReadValues = phaseSnap.getNbtReadSetValues();
+        final java.util.Map<Integer, String> entityReadValues = phaseSnap.getEntityReadSetValues();
         final boolean hasBlockReads = readValues != null && !readValues.isEmpty();
         final boolean hasScoreReads = scoreReadValues != null && !scoreReadValues.isEmpty();
         final boolean hasNbtReads = nbtReadValues != null && !nbtReadValues.isEmpty();
+        final boolean hasEntityReads = entityReadValues != null && !entityReadValues.isEmpty();
         final java.util.Map<String, Boolean> modifiedNbt = new java.util.concurrent.ConcurrentHashMap<>();
-        if (!hasBlockReads && !hasScoreReads && !hasNbtReads) {
+        final java.util.Map<Integer, Boolean> modifiedEntities = new java.util.concurrent.ConcurrentHashMap<>();
+        if (!hasBlockReads && !hasScoreReads && !hasNbtReads && !hasEntityReads) {
             com.azurebranches.command.ExpChainSupport.onValidationPassed();
             commitDeferredActions(level, phaseSnap);
             walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
@@ -715,6 +766,36 @@ tasks.register("buildFolia") {
             }
         }
 
+        // EXP6Plus: verify the scoreboard entity read-set — each entity
+        // resolved by a holder argument must still exist, checked on its own
+        // region thread.
+        if (hasEntityReads) {
+            for (final java.util.Map.Entry<Integer, String> entry : entityReadValues.entrySet()) {
+                final int entityId = entry.getKey();
+                final net.minecraft.world.entity.Entity checkEntity = level.getEntity(entityId);
+                if (checkEntity == null) {
+                    // The entity vanished after our resolution — conflict.
+                    modifiedEntities.put(entityId, Boolean.TRUE);
+                    continue;
+                }
+                final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
+                net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(checkEntity, scheduled -> {
+                    try {
+                        // Existence is the OCC criterion: a dead/removed entity
+                        // invalidates the holder set this Phase read. !isAlive()
+                        // covers the death-animation window (dead but not yet
+                        // discarded — still in level.getEntity).
+                        modifiedEntities.put(entityId,
+                            scheduled.isRemoved() || !scheduled.isAlive() || level.getEntity(entityId) == null);
+                    } finally {
+                        done.complete(null);
+                    }
+                    return null;
+                });
+                checks.add(done);
+            }
+        }
+
         java.util.concurrent.CompletableFuture.allOf(
             checks.toArray(new java.util.concurrent.CompletableFuture[0]))
             .whenComplete((v, ex) ->
@@ -725,7 +806,7 @@ tasks.register("buildFolia") {
                             return;
                         }
                         final com.azurebranches.command.PhaseValidator.ValidationResult result =
-                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified, modifiedScores, modifiedNbt);
+                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified, modifiedScores, modifiedNbt, modifiedEntities);
                         switch (result) {
                             case COMMIT -> {
                                 com.azurebranches.command.ExpChainSupport.onValidationPassed();
@@ -751,6 +832,74 @@ tasks.register("buildFolia") {
                     }));
     }
     // AzureBranches end - EXP suspendable chain implementation (v2)"""
+            )
+
+            // EXP6Plus: the walker must genuinely suspend on EXP-chain futures
+            // (registerRemote) — scoreboard mutations land on the global tick,
+            // and the next command block must see them. Previously ctx.futures
+            // were only getNow()-aggregated (never awaited), so a chain reading
+            // a score right after writing it saw the stale value.
+            transformSource(cmdBlockFile, "CommandBlock.java (EXP6Plus chain-future barrier)",
+                // (A) collect chain futures across the whole walk
+                "        final java.util.LinkedHashMap<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>\n" +
+                    "            batchRegistry = new java.util.LinkedHashMap<>();" to
+                    "        final java.util.LinkedHashMap<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>\n" +
+                    "            batchRegistry = new java.util.LinkedHashMap<>();\n" +
+                    "        final java.util.List<java.util.concurrent.CompletableFuture<Boolean>> chainFutures =\n" +
+                    "            new java.util.ArrayList<>(4); // EXP6Plus: scoreboard/global futures",
+
+                // (B) drain each command's receipt bag into the walk list
+                "                try {\n" +
+                    "                    shouldContinue = baseCommandBlock.performCommand(level);\n" +
+                    "                } finally {\n" +
+                    "                    ctx = com.azurebranches.command.ExpChainSupport.closeContext();\n" +
+                    "                }" to
+                    "                try {\n" +
+                    "                    shouldContinue = baseCommandBlock.performCommand(level);\n" +
+                    "                } finally {\n" +
+                    "                    ctx = com.azurebranches.command.ExpChainSupport.closeContext();\n" +
+                    "                }\n" +
+                    "                chainFutures.addAll(ctx.futures); // EXP6Plus",
+
+                // (C) boundary suspend call site
+                "                        dispatchAndSuspend(head, level, headBlock, firstBatchPos, pos.immutable(),\n" +
+                    "                            direction, walkRemaining, batchRegistry, batchStepCount,\n" +
+                    "                            phaseStartPos, phaseStartDir);" to
+                    "                        dispatchAndSuspend(head, level, headBlock, firstBatchPos, pos.immutable(),\n" +
+                    "                            direction, walkRemaining, batchRegistry, batchStepCount,\n" +
+                    "                            phaseStartPos, phaseStartDir, chainFutures); // EXP6Plus",
+
+                // (D) end-of-walk: suspend also when only chain futures exist
+                "        if (!batchRegistry.isEmpty()) {\n" +
+                    "            dispatchAndSuspend(head, level, headBlock, firstBatchPos, lastRunPos, direction,\n" +
+                    "                walkRemaining, batchRegistry, batchStepCount, phaseStartPos, phaseStartDir);" to
+                    "        if (!batchRegistry.isEmpty() || !chainFutures.isEmpty()) { // EXP6Plus\n" +
+                    "            dispatchAndSuspend(head, level, headBlock, firstBatchPos, lastRunPos, direction,\n" +
+                    "                walkRemaining, batchRegistry, batchStepCount, phaseStartPos, phaseStartDir, chainFutures);",
+
+                // (E) dispatchAndSuspend signature
+                "        final int batchStepCount, final BlockPos phaseStartPos, final Direction phaseStartDir) {" to
+                    "        final int batchStepCount, final BlockPos phaseStartPos, final Direction phaseStartDir,\n" +
+                    "        final java.util.List<java.util.concurrent.CompletableFuture<Boolean>> chainFutures) { // EXP6Plus",
+
+                // (F) fold chain futures into the suspend barrier
+                "        final java.util.List<java.util.concurrent.CompletableFuture<Void>> regionFutures =\n" +
+                    "            new java.util.ArrayList<>(batchRegistry.size());" to
+                    "        final java.util.List<java.util.concurrent.CompletableFuture<Void>> regionFutures =\n" +
+                    "            new java.util.ArrayList<>(batchRegistry.size());\n" +
+                    "        for (final java.util.concurrent.CompletableFuture<Boolean> chainFuture : chainFutures) {\n" +
+                    "            regionFutures.add(chainFuture.handle((v, ex) -> null)); // EXP6Plus barrier\n" +
+                    "        }",
+
+                // (G) a command that registered chain futures is a batch boundary
+                // by itself — otherwise the next block would read the scoreboard
+                // before the global-tick mutation lands.
+                "                if (!ctx.deferredByRegion.isEmpty()) {" to
+                    "                if (!ctx.deferredByRegion.isEmpty() || !ctx.futures.isEmpty()) { // EXP6Plus",
+
+                // (H) force the suspend at the boundary when futures exist
+                "                    if (conditionalBoundary || sizeBoundary) {" to
+                    "                    if (conditionalBoundary || sizeBoundary || !ctx.futures.isEmpty()) { // EXP6Plus"
             )
 
             // EXP4: SetBlockCommand write-through is now handled by the data pool
@@ -1020,7 +1169,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP6.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP6Plus.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()
