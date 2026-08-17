@@ -290,4 +290,4 @@ AzureBranches 的设计借鉴了计算机科学中多个成熟的并发控制与
 
 ## 许可
 
-MIT License. 详见 [LICENSE](LICENSE) 文件。
+**GNU General Public License version 3 (GPLv3)**。本项目是 [Folia](https://github.com/PaperMC/Folia) 的下游分支（Folia → Paper → Spigot → Bukkit → CraftBukkit 逐级继承 GPLv3），因此整个项目以 GPLv3 发布。许可证全文见 [LICENSE](LICENSE) 文件；衍生声明、修改记录位置与致谢见 [NOTICE](NOTICE.md) 文件。
