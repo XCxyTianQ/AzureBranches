@@ -164,7 +164,7 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6)。
 
-### EXP6Plus — Scoreboard 实体维度的读集与幽灵分数防护（当前版本）
+### EXP6Plus — Scoreboard 实体维度的读集与幽灵分数防护
 
 **实体维度读集（第四个 OCC 数据域）**
 - `ScoreHolderArgument.getNames` 捕获：/scoreboard 选择器解析出的实体集合以（实体 ID → scoreboardName 观测值）进入 `PhaseSnapshot`（`entityReadSet` / `entityReadSetValues`）
@@ -180,6 +180,24 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 - 携带复制延迟到挂起屏障完成之后（全局 tick 的分数写落在挂起窗口内）
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6Plus)。
+
+### EXP7 — b_linear 存储引擎与区域文件格式 v4（当前版本）
+
+**b_linear_v4 存储后端（默认 MCA，可切换）**
+- 移植 Luminol/Arbor 的 b_linear 体系（MrHua269 / Little / xymb 血统，GPLv3 派生）：`BufferedLinearRegionFile`（swap 工作文件 + master 快照 + 16×64 chunk 桶 + 每桶写纪元 + 60%/1MiB 自动压缩）+ `BufferedLinearRegionFileFlusher`（每文件保存调度/背压）
+- `IRegionFile` 抽象 + `RegionFormat` 选择器：区域文件创建点收敛为 `RegionFormat.open(...)`；同包 `RegionFileAdapter` 使默认 MCA 路径保持零行为漂移
+- 配置：`storage.region_format = "mca" | "b_linear_v4"`（默认 `mca`）、`storage.linear.compression_level`（1..22）；生效行：`[AzureBranches] storage.region_format=b_linear_v4 (compression 1)`
+
+**VERSION 4 主文件格式（读兼容 v0x02/v0x03 + xymb 线性，写 v4）**
+- 14B 头 + 16×16B 位置表（offset | compressedLen | 桶块 xxhash32）+ 21B footer（位置表 xxhash64）
+- 四层读校验链：位置表 xxhash64 → 桶块 xxhash32 → 段长上界 → chunkSection 内部 xxhash32；任一层失败 → `IOException` 携带文件与偏移，**绝不返回部分数据**
+- 加载失败置 `loadFailed` 后拒绝以空工作态覆写 master（防空写破坏）；未改动桶整块字节搬运（v3→v4 原位迁移免重压缩）
+
+**验证（EXP7 全绿）**
+- JVM 级 harness：47-chunk round-trip、桶数据/位置表/截断三类损坏注入全部检测、写中途硬杀后已提交 chunk 完好、**真实上游引擎生成的 v0x03 样本全读回 + 原位升 v4**、64×64KiB 微基准 **44.8 MiB/s vs MCA 12.5 MiB/s（≈3.6×）**
+- 服务端冒烟：全新存档 `b_linear_v4` 启动/写入/优雅停/重启/硬杀恢复全部无错；三维度 + entities 共 14 个 v4 主文件
+
+详见 [b_linear_v4 介绍文档](B_LINEAR_V4-INTRO.md)、[v4 格式规范](STORAGE-V4-SPEC.md)、[技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP7)。
 
 ## 架构概览
 
@@ -265,6 +283,7 @@ rm -f folia-server/build/cache/folia-paperclip.jar
 | **EXP5Plus** | **/scoreboard 全局 tick 恢复 + 积分板 OCC 闭环** | [**v26.1.2-EXP5Plus**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP5Plus) |
 | **EXP6** | **EntityLayer 注入与 /data 实体 NBT 的 OCC 闭环** | [**v26.1.2-EXP6**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6) |
 | **EXP6Plus** | **Scoreboard 实体维度读集与幽灵分数防护** | [**v26.1.2-EXP6Plus**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6Plus) |
+| **EXP7** | **b_linear 存储引擎与区域文件格式 v4** | [**v26.1.2-EXP7**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP7) |
 
 ## 理论基础
 
@@ -278,9 +297,9 @@ AzureBranches 的设计借鉴了计算机科学中多个成熟的并发控制与
 
 ## 灵感来源与致谢
 
-本项目的部分功能灵感来源于 [LuminolMC](https://github.com/LuminolMC/Luminol)（配置系统和实体优化思路），我们的实现对其进行了简化与重新设计，以适应 AzureBranches 自身的架构方向。
+本项目的部分功能灵感来源于 [LuminolMC](https://github.com/LuminolMC/Luminol)（配置系统和实体优化思路），我们的实现对其进行了简化与重新设计，以适应 AzureBranches 自身的架构方向。EXP7 的 b_linear 存储引擎（`IRegionFile` + `BufferedLinearRegionFile` + flusher）移植自 Luminol/Arbor 项目的 xymb 血统设计（MrHua269 / Little / ArborTeam），v4 格式在其上另行演进（见 [b_linear_v4 介绍文档](B_LINEAR_V4-INTRO.md) 与 [NOTICE](NOTICE.md)）。
 
-在此，谨向 **Luminol 开发团队 (EarthMe 等)** 致以最深的敬意——他们的开创性工作为 Folia 下游生态树立了标杆，我们从中受益良多。
+在此，谨向 **Luminol 开发团队 (EarthMe 等)** 与 **Arbor 团队 (Little 等)** 致以最深的敬意——他们的开创性工作为 Folia 下游生态树立了标杆，我们从中受益良多。
 
 ## 注意事项
 
