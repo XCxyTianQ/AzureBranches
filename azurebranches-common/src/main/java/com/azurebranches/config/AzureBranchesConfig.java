@@ -38,6 +38,8 @@ public final class AzureBranchesConfig {
     private boolean exp4EntityLayerEnabled;
     private boolean exp4DeferredActionsEnabled;
     private int exp4DeferredMaxActions;
+    private String storageRegionFormat;
+    private int storageCompressionLevel;
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
@@ -54,6 +56,11 @@ public final class AzureBranchesConfig {
 
     public static AzureBranchesConfig get() {
         if (INSTANCE == null) throw new IllegalStateException("Not initialized");
+        return INSTANCE;
+    }
+
+    /** Non-throwing accessor for early-boot code paths (returns null until {@link #init}). */
+    public static synchronized AzureBranchesConfig getOrNull() {
         return INSTANCE;
     }
 
@@ -181,6 +188,8 @@ public final class AzureBranchesConfig {
         exp4EntityLayerEnabled=getBool("command_blocks.exp4.entity_layer.enabled",true);
         exp4DeferredActionsEnabled=getBool("command_blocks.exp4.deferred_actions.enabled",true);
         exp4DeferredMaxActions=getInt("command_blocks.exp4.deferred_actions.max_per_phase",256);
+        storageRegionFormat=getString("storage.region_format","mca");
+        storageCompressionLevel=getInt("storage.linear.compression_level",1);
         entityLimitTypes.clear();
         for (Map.Entry<String,Object> e : values.entrySet()) {
             if (e.getKey().startsWith("entity_limits.types.") && e.getValue() instanceof Map) {
@@ -217,6 +226,8 @@ public final class AzureBranchesConfig {
         setDefault("command_blocks.exp4.entity_layer.enabled",true);
         setDefault("command_blocks.exp4.deferred_actions.enabled",true);
         setDefault("command_blocks.exp4.deferred_actions.max_per_phase",256L);
+        setDefault("storage.region_format","mca");
+        setDefault("storage.linear.compression_level",1L);
     }
 
     private void setDefault(String key, Object value) { if(!values.containsKey(key))values.put(key,value); }
@@ -244,4 +255,6 @@ public final class AzureBranchesConfig {
     public boolean exp4EntityLayerEnabled() { return exp4EntityLayerEnabled; }
     public boolean exp4DeferredActionsEnabled() { return exp4DeferredActionsEnabled; }
     public int exp4DeferredMaxActions() { return exp4DeferredMaxActions; }
+    public String storageRegionFormat() { return storageRegionFormat; }
+    public int storageCompressionLevel() { return storageCompressionLevel; }
 }

@@ -39,3 +39,10 @@ _wip_io/
 # Reasonix tooling
 .reasonix/
 reasonix.toml
+
+# EXP7 test server / artifacts
+exp7-test/
+build-exp7*.log
+build-exp*.log
+rcon-*.py
+

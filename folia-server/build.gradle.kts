@@ -1,11 +1,11 @@
 /*
- * AzureBranches — Build
+ * AzureBranches 鈥?Build
  *
  * Clones Folia ver/26.1.x from GitHub, builds it from source
  * via paperweight, then merges our classes into the output JAR.
  *
- * Credits: Luminol / Lophine by EarthMe — Maven + clone pattern
- *          Folia / Paperclip by PaperMC — server bootstrap
+ * Credits: Luminol / Lophine by EarthMe 鈥?Maven + clone pattern
+ *          Folia / Paperclip by PaperMC 鈥?server bootstrap
  */
 import java.io.File
 import java.nio.file.Files
@@ -38,7 +38,7 @@ dependencies {
     compileOnly("org.jetbrains:annotations:24.1.0")
 }
 
-// ── Helpers ──
+// 鈹€鈹€ Helpers 鈹€鈹€
 
 fun sh(dir: File? = null, vararg cmd: String): Int {
     val pb = ProcessBuilder(*cmd).redirectErrorStream(true)
@@ -94,7 +94,7 @@ fun transformSource(file: File, what: String, vararg steps: Pair<String, String>
     println("  Applied transformations to $what")
 }
 
-// ── Clone Folia ──
+// 鈹€鈹€ Clone Folia 鈹€鈹€
 
 val foliaJar = layout.buildDirectory.file("cache/folia-paperclip.jar")
 
@@ -158,7 +158,7 @@ tasks.register("cloneFolia") {
     }
 }
 
-// ── Build Folia ──
+// 鈹€鈹€ Build Folia 鈹€鈹€
 
 tasks.register("buildFolia") {
     dependsOn("cloneFolia")
@@ -260,7 +260,7 @@ tasks.register("buildFolia") {
                     "        verifyReadSetAndResume(head, level, headBlock, cont, resumePos, resumeDir, nextPhaseSnap);",
 
                 // EXP6Plus: cross-Phase carries must be captured AFTER the
-                // suspend barrier — the global-tick score write lands in the
+                // suspend barrier 鈥?the global-tick score write lands in the
                 // PhaseSnapshot during the suspend window, so copying at
                 // dispatch time would see an empty write state.
                 "                        head.removeContinuation(cont);\n" +
@@ -275,7 +275,7 @@ tasks.register("buildFolia") {
                     "                        head.removeContinuation(cont);\n" +
                     "                        aggregateAndResume(head, level, headBlock, cont, firstBatchPos, batchRegistry);",
 
-                // EXP4: OCC rollback & retry — restore pre-write old states on the
+                // EXP4: OCC rollback & retry 鈥?restore pre-write old states on the
                 // target regions, then replay the whole Phase from its start.
                 "    // AzureBranches end - EXP suspendable chain implementation (v2)" to
                     """    // AzureBranches start - EXP4: OCC rollback & retry (wired by build script)
@@ -288,13 +288,13 @@ tasks.register("buildFolia") {
         // EXP5Plus P2: scoreboard compensation must run on the global tick
         // thread (scoreboard is server-global data). EXP6: entity-NBT
         // compensation must run per-entity on each entity's OWNING REGION
-        // thread — this fixes the P2 latent bug where it ran on the global
+        // thread 鈥?this fixes the P2 latent bug where it ran on the global
         // tick thread. Run all compensation async first, then chain block
         // restore + replay. Compensation is best-effort and logs failures
         // internally.
         final java.util.List<java.util.concurrent.CompletableFuture<Void>> compensationFutures =
             new java.util.ArrayList<>(4);
-        // EXP6Plus: ghost-score guard — collect the scoreboard identities of
+        // EXP6Plus: ghost-score guard 鈥?collect the scoreboard identities of
         // entities that already vanished, so score compensation never
         // recreates a score entry for a dead entity (getOrCreatePlayerScore
         // would silently resurrect a ghost holder).
@@ -321,7 +321,7 @@ tasks.register("buildFolia") {
                             // (ServerLevel comments the call out), so dead
                             // entities' score entries survive on their own.
                             // Emulate the vanilla clear instead of writing a
-                            // value back — never resurrect or refresh a ghost.
+                            // value back 鈥?never resurrect or refresh a ghost.
                             com.azurebranches.command.ExpChainSupport.onScoreCompensationFailed();
                             final net.minecraft.world.scores.Objective ghostObj =
                                 level.getScoreboard().getObjective(objective);
@@ -364,7 +364,7 @@ tasks.register("buildFolia") {
 
         final java.util.Map<Long, Object> oldStates = phaseSnap.getOldBlockStates();
         if (oldStates == null || oldStates.isEmpty()) {
-            // Nothing to roll back — retry from the Phase start on the head region
+            // Nothing to roll back 鈥?retry from the Phase start on the head region
             io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
                 .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
                     if (!head.isCurrent(cont)) {
@@ -412,7 +412,7 @@ tasks.register("buildFolia") {
                                 level.setBlock(r.getKey(), r.getValue(), 3);
                             } catch (final Exception restoreEx) {
                                 // EXP4: a failed restore leaves the world partially
-                                // rolled back — log it so it is never silent.
+                                // rolled back 鈥?log it so it is never silent.
                                 System.err.println("[AzureBranches] rollback restore failed at "
                                     + r.getKey() + ": " + restoreEx.getMessage());
                             }
@@ -444,7 +444,7 @@ tasks.register("buildFolia") {
         final com.azurebranches.command.Continuation cont,
         final com.azurebranches.command.PhaseSnapshot phaseSnap) {
 
-        // The world has been restored to its pre-Phase state — replay the
+        // The world has been restored to its pre-Phase state 鈥?replay the
         // whole Phase from its start, re-reading the world.
         phaseSnap.resetForRetry();
         final BlockPos.MutableBlockPos retryPos = BlockPos.of(cont.phaseStartPos).mutable();
@@ -465,7 +465,7 @@ tasks.register("buildFolia") {
         if (value instanceof net.minecraft.nbt.StringTag str) {
             return str.value();
         }
-        return value; // compound/list — compared structurally via equals()
+        return value; // compound/list 鈥?compared structurally via equals()
     }
 
     private static Object readEntityNbtPath(final ServerLevel level, final int entityId, final String path) {
@@ -478,7 +478,7 @@ tasks.register("buildFolia") {
         final int brace = path.indexOf('{');
         final int bracket = path.indexOf('[');
         if (brace >= 0) {
-            // Slot path: "Inventory{Slot:0b}[/sub]" — locate the list entry by
+            // Slot path: "Inventory{Slot:0b}[/sub]" 鈥?locate the list entry by
             // its stable slot descriptor instead of a list index.
             final int slash = path.indexOf('/', brace);
             final String containerName = path.substring(0, brace);
@@ -566,7 +566,7 @@ tasks.register("buildFolia") {
                         list.set(found, replacement);
                     }
                 } else if (slash < 0 && converted instanceof net.minecraft.nbt.CompoundTag replacement) {
-                    // The slot entry was removed — re-append it; the Slot value
+                    // The slot entry was removed 鈥?re-append it; the Slot value
                     // inside the compound preserves the semantic slot identity.
                     list.add(replacement.copy());
                 }
@@ -741,7 +741,7 @@ tasks.register("buildFolia") {
                 final java.util.List<java.util.Map.Entry<String, Object>> entries = e.getValue();
                 final net.minecraft.world.entity.Entity checkEntity = level.getEntity(entityId);
                 if (checkEntity == null) {
-                    // The entity vanished after our read — treat as conflict.
+                    // The entity vanished after our read 鈥?treat as conflict.
                     for (final java.util.Map.Entry<String, Object> entry : entries) {
                         modifiedNbt.put(entry.getKey(), Boolean.TRUE);
                     }
@@ -766,7 +766,7 @@ tasks.register("buildFolia") {
             }
         }
 
-        // EXP6Plus: verify the scoreboard entity read-set — each entity
+        // EXP6Plus: verify the scoreboard entity read-set 鈥?each entity
         // resolved by a holder argument must still exist, checked on its own
         // region thread.
         if (hasEntityReads) {
@@ -774,7 +774,7 @@ tasks.register("buildFolia") {
                 final int entityId = entry.getKey();
                 final net.minecraft.world.entity.Entity checkEntity = level.getEntity(entityId);
                 if (checkEntity == null) {
-                    // The entity vanished after our resolution — conflict.
+                    // The entity vanished after our resolution 鈥?conflict.
                     modifiedEntities.put(entityId, Boolean.TRUE);
                     continue;
                 }
@@ -784,7 +784,7 @@ tasks.register("buildFolia") {
                         // Existence is the OCC criterion: a dead/removed entity
                         // invalidates the holder set this Phase read. !isAlive()
                         // covers the death-animation window (dead but not yet
-                        // discarded — still in level.getEntity).
+                        // discarded 鈥?still in level.getEntity).
                         modifiedEntities.put(entityId,
                             scheduled.isRemoved() || !scheduled.isAlive() || level.getEntity(entityId) == null);
                     } finally {
@@ -835,7 +835,7 @@ tasks.register("buildFolia") {
             )
 
             // EXP6Plus: the walker must genuinely suspend on EXP-chain futures
-            // (registerRemote) — scoreboard mutations land on the global tick,
+            // (registerRemote) 鈥?scoreboard mutations land on the global tick,
             // and the next command block must see them. Previously ctx.futures
             // were only getNow()-aggregated (never awaited), so a chain reading
             // a score right after writing it saw the stale value.
@@ -892,7 +892,7 @@ tasks.register("buildFolia") {
                     "        }",
 
                 // (G) a command that registered chain futures is a batch boundary
-                // by itself — otherwise the next block would read the scoreboard
+                // by itself 鈥?otherwise the next block would read the scoreboard
                 // before the global-tick mutation lands.
                 "                if (!ctx.deferredByRegion.isEmpty()) {" to
                     "                if (!ctx.deferredByRegion.isEmpty() || !ctx.futures.isEmpty()) { // EXP6Plus",
@@ -909,6 +909,44 @@ tasks.register("buildFolia") {
             if (setBlockFile.exists()) {
                 println("  EXP4: SetBlockCommand relies on data pool interception (no per-command patch needed)")
             }
+
+            // EXP7: storage engine integration 鈥?retype the Moonrise region-file
+            // storage surface from vanilla RegionFile to IRegionFile so the
+            // configurable format factory (com.azurebranches.storage.RegionFormat)
+            // can produce MCA or the Buffered Linear v4 backend.
+            val regionStorageFile = File(minecraftSrc,
+                "ca/spottedleaf/moonrise/patches/chunk_system/io/ChunkSystemRegionFileStorage.java")
+            transformSource(regionStorageFile, "ChunkSystemRegionFileStorage.java (EXP7 IRegionFile)",
+                "    public RegionFile moonrise\$getRegionFileIfLoaded(final int chunkX, final int chunkZ);" to
+                    "    public com.azurebranches.storage.IRegionFile moonrise\$getRegionFileIfLoaded(final int chunkX, final int chunkZ); // EXP7",
+                "    public RegionFile moonrise\$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException;" to
+                    "    public com.azurebranches.storage.IRegionFile moonrise\$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException; // EXP7"
+            )
+
+            val moonriseIoFile = File(minecraftSrc,
+                "ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java")
+            transformSource(moonriseIoFile, "MoonriseRegionFileIO.java (EXP7 IRegionFile)",
+                "                    final RegionFile regionFile = this.regionDataController.getCache().moonrise\$getRegionFileIfLoaded(this.chunkX, this.chunkZ);" to
+                    "                    final com.azurebranches.storage.IRegionFile regionFile = this.regionDataController.getCache().moonrise\$getRegionFileIfLoaded(this.chunkX, this.chunkZ); // EXP7",
+                "            public void run(final RegionFile regionFile) throws IOException;" to
+                    "            public void run(final com.azurebranches.storage.IRegionFile regionFile) throws IOException; // EXP7"
+            )
+
+            val chunkBufferFile = File(minecraftSrc,
+                "ca/spottedleaf/moonrise/patches/chunk_system/storage/ChunkSystemChunkBuffer.java")
+            transformSource(chunkBufferFile, "ChunkSystemChunkBuffer.java (EXP7 IRegionFile)",
+                "    public void moonrise\$write(final RegionFile regionFile) throws IOException;" to
+                    "    public void moonrise\$write(final com.azurebranches.storage.IRegionFile regionFile) throws IOException; // EXP7"
+            )
+
+            val vanillaRegionFile = File(minecraftSrc,
+                "net/minecraft/world/level/chunk/storage/RegionFile.java")
+            transformSource(vanillaRegionFile, "RegionFile.java (EXP7 IRegionFile)",
+                "public class RegionFile implements AutoCloseable, ca.spottedleaf.moonrise.patches.chunk_system.storage.ChunkSystemRegionFile {" to
+                    "public class RegionFile implements AutoCloseable, ca.spottedleaf.moonrise.patches.chunk_system.storage.ChunkSystemRegionFile {",
+                "        public final void moonrise\$write(final RegionFile regionFile) throws IOException {" to
+                    "        public final void moonrise\$write(final com.azurebranches.storage.IRegionFile regionFile) throws IOException { // EXP7"
+            )
 
             // EXP4: intercept Level.getBlockState() for a transparent PhaseSnapshot
             // cache plus OCC read-set recording (covers all block read/write commands).
@@ -984,7 +1022,7 @@ tasks.register("buildFolia") {
 
             // EXP5Plus P2: intercept the Scoreboard data pool so /scoreboard (and
             // any scoreboard access) inside an EXP command-block chain records
-            // reads/writes into the PhaseSnapshot — score read-set values for OCC
+            // reads/writes into the PhaseSnapshot 鈥?score read-set values for OCC
             // validation and pre-write old values for ScoreLayer rollback.
             val scoreboardFile = File(minecraftSrc, "net/minecraft/world/scores/Scoreboard.java")
             transformSource(scoreboardFile, "Scoreboard.java (EXP5Plus score interception)",
@@ -1041,7 +1079,7 @@ tasks.register("buildFolia") {
                     "                    boolean hasChanged = requiresSync.isTrue();",
 
                 // WRITE hook: resetAllPlayerScores removes entries without going
-                // through ScoreAccess — capture old values first.
+                // through ScoreAccess 鈥?capture old values first.
                 "    public void resetAllPlayerScores(final ScoreHolder player) {\n" +
                     "        PlayerScores removed = this.playerScores.remove(player.getScoreboardName());" to
                     "    public void resetAllPlayerScores(final ScoreHolder player) {\n" +
@@ -1094,7 +1132,7 @@ tasks.register("buildFolia") {
         val overrideSrc = file("azurepatches-src")
         if (overrideSrc.exists()) {
             // Fail fast if an overlay file has no counterpart in the freshly
-            // generated sources — otherwise an upstream layout change would be
+            // generated sources 鈥?otherwise an upstream layout change would be
             // silently masked by our old snapshot.
             val generatedMinecraftSrc = File(foliaDir, "folia-server/src/minecraft/java")
             overrideSrc.walkTopDown().filter { it.isFile }.forEach { f ->
@@ -1123,10 +1161,16 @@ tasks.register("buildFolia") {
         // AzureBranches: patch brand & version identity before building paperclip
         val serverBuildFile = File(foliaDir, "folia-server/build.gradle.kts")
         val originalBuildContent = serverBuildFile.readText()
-        val patchedBuildContent = originalBuildContent
+        val patchedBuildContent = (originalBuildContent
             .replace("\"Brand-Id\" to \"papermc:folia\"", "\"Brand-Id\" to \"azurebranches\"")
             .replace("\"Brand-Name\" to \"Folia\"", "\"Brand-Name\" to \"AzureBranches\"")
-            .replace("\"Specification-Title\" to \"Folia\"", "\"Specification-Title\" to \"AzureBranches\"")
+            .replace("\"Specification-Title\" to \"Folia\"", "\"Specification-Title\" to \"AzureBranches\"")) +
+            // AzureBranches EXP7: storage engine deps (Buffered Linear v4 backend)
+            // lz4-java is already on the runtime classpath (velocity-natives transitive)
+            "\n\n// AzureBranches EXP7: storage engine deps\ndependencies {\n" +
+            "    implementation(\"com.github.luben:zstd-jni:1.5.4-1\")\n" +
+            "    implementation(\"net.openhft:zero-allocation-hashing:0.16\")\n" +
+            "}\n"
         serverBuildFile.writeText(patchedBuildContent)
         println("  Patched server identity: AzureBranches")
 
@@ -1162,7 +1206,7 @@ tasks.register("buildFolia") {
     }
 }
 
-// ── Merge ──
+// 鈹€鈹€ Merge 鈹€鈹€
 
 tasks.register("mergeJar") {
     dependsOn(tasks.compileJava, "buildFolia")
