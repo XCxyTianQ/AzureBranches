@@ -46,3 +46,7 @@ build-exp7*.log
 build-exp*.log
 rcon-*.py
 
+
+# EXP7 arena test backend
+exp7-test2/
+
