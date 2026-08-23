@@ -1122,6 +1122,24 @@ tasks.register("buildFolia") {
                     "        }\n" +
                     "        PlayerScores scores = this.playerScores.get(player.getScoreboardName());"
             )
+
+            // EXP7Plus: Folia upstream commented out the join-time scoreboard sync in
+            // PlayerList.placeNewPlayer ("Folia - region threading"). The client then never
+            // receives objectives/display/scores (or teams) on login - a sidebar vanishes
+            // after a relog while the server-side state stays intact. Restore the sync on
+            // the global tick thread (the scoreboard is server-global data).
+            val playerListFile = File(minecraftSrc, "net/minecraft/server/players/PlayerList.java")
+            transformSource(playerListFile, "PlayerList.java (EXP7Plus join scoreboard sync)",
+                "        //this.updateEntireScoreboard(level.getScoreboard(), player); // Folia - region threading" to
+                    "        // AzureBranches EXP7Plus: restore the Folia-disabled join-time scoreboard\n" +
+                    "        // sync. Server-global data must be read on the global tick thread; the\n" +
+                    "        // original call ran on the player's region thread (see the Folia comment).\n" +
+                    "        final ServerLevel _expSyncLevel = level; // captured before the join event may move the player\n" +
+                    "        net.minecraft.server.commands.RegionCommandExecutor.onGlobalAsync(() -> {\n" +
+                    "            PlayerList.this.updateEntireScoreboard(_expSyncLevel.getScoreboard(), player);\n" +
+                    "            return null;\n" +
+                    "        });"
+            )
         }
 
         // AzureBranches: overlay modified/added Minecraft sources after
@@ -1213,7 +1231,7 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP6Plus.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP7Plus.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()

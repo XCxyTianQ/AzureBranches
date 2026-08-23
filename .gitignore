@@ -50,3 +50,8 @@ rcon-*.py
 # EXP7 arena test backend
 exp7-test2/
 
+
+# EXP6Plus-P1 / vanilla control test servers
+exp6plus-test/
+vanilla-test/
+

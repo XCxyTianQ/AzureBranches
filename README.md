@@ -181,7 +181,7 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 
 详见 [技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6Plus)。
 
-### EXP7 — b_linear 存储引擎与区域文件格式 v4（当前版本）
+### EXP7 — b_linear 存储引擎与区域文件格式 v4
 
 **b_linear_v4 存储后端（默认 MCA，可切换）**
 - 移植 Luminol/Arbor 的 b_linear 体系（MrHua269 / Little / xymb 血统，GPLv3 派生）：`BufferedLinearRegionFile`（swap 工作文件 + master 快照 + 16×64 chunk 桶 + 每桶写纪元 + 60%/1MiB 自动压缩）+ `BufferedLinearRegionFileFlusher`（每文件保存调度/背压）
@@ -198,6 +198,19 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 - 服务端冒烟：全新存档 `b_linear_v4` 启动/写入/优雅停/重启/硬杀恢复全部无错；三维度 + entities 共 14 个 v4 主文件
 
 详见 [b_linear_v4 介绍文档](B_LINEAR_V4-INTRO.md)、[v4 格式规范](STORAGE-V4-SPEC.md)、[技术文档](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP7)。
+
+### EXP7Plus — 登录计分板同步恢复与 /team 恢复（当前版本）
+
+**玩家反馈驱动的两项修复（EXP7 之后，Aria 实测报告）**
+
+- **重进后 sidebar 消失（数据仍在）**：Folia 上游在 `PlayerList.placeNewPlayer` 注释掉了 `updateEntireScoreboard`（`// Folia - region threading`）——客户端登录时收不到 SetObjective / SetDisplayObjective / SetScore（及 teams），而服务端展示槽状态完好。EXP7Plus 以 fail-fast 锚点恢复该调用，并派发到 **全局 tick 线程** 执行（计分板是服务器全局数据；lambda 以 join 时刻的 world 快照捕获，避免 join 事件改世界后的语义漂移）。
+- **/team 不可用**：Folia 上游禁用了 `TeamCommand.register`（`// Folia - region threading - TODO later`），`/team` 报 Unknown command。EXP7Plus 恢复注册，并新增全 handler 派发的 `TeamCommand` 覆盖层（镜像 /scoreboard 的全局 tick dispatch：任务在全局 tick 执行、反馈经 `RegionCommandExecutor.runOnSource` 路由回源区域），EXP 链内同样挂链 future 屏障。
+
+**验证（与 vanilla 26.1.2 控制组对照）**
+- 重进后客户端收到：`0x6D` SetPlayerTeam（testteam）+ `0x6A` SetObjective + `0x62` SetDisplayObjective（sidebar）+ `0x6E` SetScore（probe=7）——与 vanilla 登录包组**完全一致**（vanilla 同样发这四类，修复前 Folia 一个都不发）；
+- `/team add | list | modify color | join` 经 RCON 全部成功（服务端日志确认），全程无区域/全局线程异常。
+
+产物：`azurebranches-server-26.1.2-AB-0002-EXP7Plus.jar`（57 MB，与 EXP7 同源自 EXP7 分支基线构建）。
 
 ## 架构概览
 
@@ -284,6 +297,7 @@ rm -f folia-server/build/cache/folia-paperclip.jar
 | **EXP6** | **EntityLayer 注入与 /data 实体 NBT 的 OCC 闭环** | [**v26.1.2-EXP6**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6) |
 | **EXP6Plus** | **Scoreboard 实体维度读集与幽灵分数防护** | [**v26.1.2-EXP6Plus**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP6Plus) |
 | **EXP7** | **b_linear 存储引擎与区域文件格式 v4** | [**v26.1.2-EXP7**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP7) |
+| **EXP7Plus** | **登录计分板同步恢复 + /team 恢复（Folia 线程化）** | [**v26.1.2-EXP7Plus**](https://github.com/XCxyTianQ/AzureBranches/releases/tag/v26.1.2-EXP7Plus) |
 
 ## 理论基础
 

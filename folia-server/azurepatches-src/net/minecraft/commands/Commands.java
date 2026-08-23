@@ -252,7 +252,7 @@ public class Commands {
         StopwatchCommand.register(this.dispatcher);
         SummonCommand.register(this.dispatcher, context);
         TagCommand.register(this.dispatcher); // AzureBranches: restored - region-aware execution
-        //TeamCommand.register(this.dispatcher, context); // Folia - region threading - TODO later
+        TeamCommand.register(this.dispatcher, context); // AzureBranches: restored - team ops on global tick (EXP7Plus)
         //TeamMsgCommand.register(this.dispatcher); // Folia - region threading - TODO later
         TeleportCommand.register(this.dispatcher);
         TellRawCommand.register(this.dispatcher, context);
