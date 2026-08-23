@@ -212,6 +212,8 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 
 产物：`azurebranches-server-26.1.2-AB-0002-EXP7Plus.jar`（57 MB，与 EXP7 同源自 EXP7 分支基线构建）。
 
+> 📖 **双端配置手册（简单版）**：[AzureProxy CONFIG-GUIDE.md](https://github.com/XCxyTianQ/AzureProxy/blob/main/CONFIG-GUIDE.md) —— 代理 + 后端从零搭建、端口/secret/档位/常见问题。
+
 ## 架构概览
 
 ```
