@@ -205,10 +205,12 @@ Folia 通过将世界划分为独立的 Region（16×16 区块网格）并在每
 
 - **重进后 sidebar 消失（数据仍在）**：Folia 上游在 `PlayerList.placeNewPlayer` 注释掉了 `updateEntireScoreboard`（`// Folia - region threading`）——客户端登录时收不到 SetObjective / SetDisplayObjective / SetScore（及 teams），而服务端展示槽状态完好。EXP7Plus 以 fail-fast 锚点恢复该调用，并派发到 **全局 tick 线程** 执行（计分板是服务器全局数据；lambda 以 join 时刻的 world 快照捕获，避免 join 事件改世界后的语义漂移）。
 - **/team 不可用**：Folia 上游禁用了 `TeamCommand.register`（`// Folia - region threading - TODO later`），`/team` 报 Unknown command。EXP7Plus 恢复注册，并新增全 handler 派发的 `TeamCommand` 覆盖层（镜像 /scoreboard 的全局 tick dispatch：任务在全局 tick 执行、反馈经 `RegionCommandExecutor.runOnSource` 路由回源区域），EXP 链内同样挂链 future 屏障。
+- **/teammsg 与团队语义失效（追加）**：Folia 上游同时禁用了 `TeamMsgCommand.register` 并**硬禁用 `Entity.getTeam()`**（`if (true) return null;`）——不仅 `/teammsg`，`isAlliedTo` / `getTeamColor` / 队伍可见性等全部团队语义在服务端失效。EXP7Plus 恢复 TeamMsgCommand 注册（同样 dispatch 到全局 tick），并为 `Entity.getTeam()` 加**全局 tick 线程守卫**：全局 tick 上执行真实查询，区域线程保持返回 null（保留 Folia 的数据竞争防护）。
 
 **验证（与 vanilla 26.1.2 控制组对照）**
 - 重进后客户端收到：`0x6D` SetPlayerTeam（testteam）+ `0x6A` SetObjective + `0x62` SetDisplayObjective（sidebar）+ `0x6E` SetScore（probe=7）——与 vanilla 登录包组**完全一致**（vanilla 同样发这四类，修复前 Folia 一个都不发）；
-- `/team add | list | modify color | join` 经 RCON 全部成功（服务端日志确认），全程无区域/全局线程异常。
+- `/team add | list | modify color | join` 经 RCON 全部成功（服务端日志确认），全程无区域/全局线程异常；
+- **玩家路径全链路**（合成 775 客户端 op 后实测）：`/team add` + `/team join`（成功反馈带转义键）、`/teammsg hello` + `/tm 别名`（`0x41` 玩家聊天回声含发送者与 `[testteam]` 团队名 + `/teammsg` 点击建议样式；修复前报 `commands.teammsg.failed.noteam`），团队语义（`getTeam`）在全局 tick 守卫下恢复。
 
 产物：`azurebranches-server-26.1.2-AB-0002-EXP7Plus.jar`（57 MB，与 EXP7 同源自 EXP7 分支基线构建）。
 

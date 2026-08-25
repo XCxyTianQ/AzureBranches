@@ -1140,6 +1140,34 @@ tasks.register("buildFolia") {
                     "            return null;\n" +
                     "        });"
             )
+
+            // EXP7Plus: Folia also hard-disabled Entity.getTeam() ("region threading" -
+            // it reads the server-global scoreboard). That breaks /teammsg and every
+            // team-based semantic (isAlliedTo/getTeamColor/visibility checks). Restore
+            // the real lookup on the global tick thread only; regional reads keep
+            // returning null to preserve Folia's data-race protection.
+            val entityFile = File(minecraftSrc, "net/minecraft/world/entity/Entity.java")
+            transformSource(entityFile, "Entity.java (EXP7Plus team lookup allowed on global tick)",
+                "    public @Nullable PlayerTeam getTeam() {\n" +
+                    "        // Folia start - region threading\n" +
+                    "        if (true) {\n" +
+                    "            return null;\n" +
+                    "        }\n" +
+                    "        // Folia end - region threading\n" +
+                    "        if (!this.level().paperConfig().scoreboards.allowNonPlayerEntitiesOnScoreboards && !(this instanceof Player)) { return null; } // Paper - Perf: Disable Scoreboards for non players by default\n" +
+                    "        return this.level().getScoreboard().getPlayersTeam(this.getScoreboardName());\n" +
+                    "    }" to
+                    "    public @Nullable PlayerTeam getTeam() {\n" +
+                    "        // AzureBranches EXP7Plus: restore the Folia-disabled team lookup, but only on\n" +
+                    "        // the global tick thread (the scoreboard is server-global data; regional reads\n" +
+                    "        // keep returning null to preserve Folia's data-race protection).\n" +
+                    "        if (!io.papermc.paper.threadedregions.RegionizedServer.isGlobalTickThread()) {\n" +
+                    "            return null;\n" +
+                    "        }\n" +
+                    "        if (!this.level().paperConfig().scoreboards.allowNonPlayerEntitiesOnScoreboards && !(this instanceof Player)) { return null; } // Paper - Perf: Disable Scoreboards for non players by default\n" +
+                    "        return this.level().getScoreboard().getPlayersTeam(this.getScoreboardName());\n" +
+                    "    }"
+            )
         }
 
         // AzureBranches: overlay modified/added Minecraft sources after
