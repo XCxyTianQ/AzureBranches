@@ -112,21 +112,29 @@ public class TeamCommand {
                         .then(
                             Commands.argument("team", TeamArgument.team())
                                 .executes(
-                                    c -> dispatch(
-                                        c.getSource(),
-                                        () -> joinTeam(c.getSource(), TeamArgument.getTeam(c, "team"), Collections.singleton(c.getSource().getEntityOrException()))
-                                    )
+                                    c -> {
+                                        // EXP7Plus: resolve the sender on the source (region) thread -
+                                        // entity iteration is region data and is not safe on the global tick.
+                                        final Collection<ScoreHolder> members = Collections.singleton(c.getSource().getEntityOrException());
+                                        return dispatch(
+                                            c.getSource(),
+                                            () -> joinTeam(c.getSource(), TeamArgument.getTeam(c, "team"), members)
+                                        );
+                                    }
                                 )
                                 .then(
                                     Commands.argument("members", ScoreHolderArgument.scoreHolders())
                                         .suggests(ScoreHolderArgument.SUGGEST_SCORE_HOLDERS)
                                         .executes(
-                                            c -> dispatch(
-                                                c.getSource(),
-                                                () -> joinTeam(
-                                                    c.getSource(), TeamArgument.getTeam(c, "team"), ScoreHolderArgument.getNamesWithDefaultWildcard(c, "members")
-                                                )
-                                            )
+                                            c -> {
+                                                // EXP7Plus: resolve selectors on the source (region) thread.
+                                                final Collection<ScoreHolder> members =
+                                                    ScoreHolderArgument.getNamesWithDefaultWildcard(c, "members");
+                                                return dispatch(
+                                                    c.getSource(),
+                                                    () -> joinTeam(c.getSource(), TeamArgument.getTeam(c, "team"), members)
+                                                );
+                                            }
                                         )
                                 )
                         )
@@ -136,7 +144,14 @@ public class TeamCommand {
                         .then(
                             Commands.argument("members", ScoreHolderArgument.scoreHolders())
                                 .suggests(ScoreHolderArgument.SUGGEST_SCORE_HOLDERS)
-                                .executes(c -> dispatch(c.getSource(), () -> leaveTeam(c.getSource(), ScoreHolderArgument.getNamesWithDefaultWildcard(c, "members"))))
+                                .executes(
+                                    c -> {
+                                        // EXP7Plus: resolve selectors on the source (region) thread.
+                                        final Collection<ScoreHolder> members =
+                                            ScoreHolderArgument.getNamesWithDefaultWildcard(c, "members");
+                                        return dispatch(c.getSource(), () -> leaveTeam(c.getSource(), members));
+                                    }
+                                )
                         )
                 )
                 .then(
