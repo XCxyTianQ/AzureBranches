@@ -172,7 +172,10 @@ para("(1) azurepatches-src/Commands.java 恢复 TeamCommand 与 TeamMsgCommand �
      "ScoreboardCommand 的既定模式——PhaseSnapshot 线程局部传播（链式上下文中 OCC 快照随任务进入全局 tick）、"
      " `ExpChainSupport.registerRemote()` 链 future 屏障（命令块 EXP 链真正等到落地）、errorComponent 解开异步失败"
      "（保留 CommandSyntaxException 本地化）、反馈统一经 runOnSource 路由回源区域（控制台内联）。teammsg 的消息投递"
-     "（sendChatMessage）保持走 vanilla 的异步 chat-decoration 链（chat chainer），不改其语义。")
+     "（sendChatMessage）保持走 vanilla 的异步 chat-decoration 链（chat chainer），不改其语义。"
+     "**threading 细节（实测驱动）**：成员 holder 的解析（ScoreHolderArgument 选择器）必须在**源（区域）线程**完成——"
+     "选择器遍历实体是区域数据，放全局 tick 任务内会触发 Folia 的 `getEntities asynchronously` 线程检查（非玩家实体"
+     "分队验证时实际捕获）；解析后的纯团队操作才进全局 tick，与 EXP6Plus ScoreboardCommand 的源线程解析模式一致。")
 para("4.3　getTeam 恢复：全局 tick 守卫", size=12, bold_all=True, align="left")
 para("以 transformSource 锚点把 Folia 禁用块替换为：**全局 tick 线程上执行真实查询**（"
      "`if (!RegionizedServer.isGlobalTickThread()) return null;`），区域线程保持返回 null——精确保留 Folia 的"
@@ -205,7 +208,11 @@ para("· `/team add testteam`：成功，反馈组件含 commands.team.add.succe
 para("· `/team join testteam`：成功，反馈含 commands.team.join.success.single 与 probe + [testteam]；", space_after=3)
 para("· `/teammsg hello exp7plus`：**0x41 玩家聊天回声（len=537）**，含发送者 probe 与 [testteam] 团队名 + /teammsg 点击建议样式——修复前报 commands.teammsg.failed.noteam（getTeam null）；", space_after=3)
 para("· `/tm alias works`：别名重定向同样送达（同 0x41 路径）；", space_after=3)
-para("· 登录同步回归：重进后 0x6D SetPlayerTeam（含 probe、testteam marker）正常抵达。", space_after=3)
+para("· 登录同步回归：重进后 0x6D SetPlayerTeam（含 probe、testteam marker）正常抵达；", space_after=3)
+para("· **非玩家实体分队（原版语义）**：`/team join mobs @e[type=zombie,distance=..20]` 成功——0x6D SetPlayerTeam "
+     "成员列表**携带实体 UUID**（新召唤僵尸 + 既有僵尸均入列）、`team list mobs` 显示成员、零线程异常；"
+     "服务端团队语义仍受 Paper 配置 `scoreboards.allow-non-player-entities-on-scoreboards`（默认 false）门控——"
+     "实体入队与客户端队色映射不受影响（与 Paper 性能默认一致），开启该配置即获得完整服务端语义。", space_after=3)
 para("（注：26.1 的 SystemChat 组件以 NBT 流编解码，合成客户端的 JSON 解析不适用——验证一律以字节级 marker/转义键字段为准。）")
 para("5.4　构建与运行", size=12, bold_all=True, align="left")
 para("已知陷阱再次命中并规避：buildFolia 有 folia-paperclip.jar 缓存（`Folia cached (57 MB)`）会跳过整个"
