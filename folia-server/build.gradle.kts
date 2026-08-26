@@ -1120,7 +1120,35 @@ tasks.register("buildFolia") {
                     "                }\n" +
                     "            }\n" +
                     "        }\n" +
-                    "        PlayerScores scores = this.playerScores.get(player.getScoreboardName());"
+                    "        PlayerScores scores = this.playerScores.get(player.getScoreboardName());",
+
+                // EXP7Plus: team maps must be safe to read from any Folia thread
+                // (selector team= filtering, TeamArgument, Bukkit API) while the
+                // single writer stays on the global tick. ConcurrentHashMap gives
+                // safe concurrent reads with weakly-consistent iteration.
+                "    private final Object2ObjectMap<String, PlayerTeam> teamsByName = new Object2ObjectOpenHashMap<>();" to
+                    "    private final java.util.Map<String, PlayerTeam> teamsByName = new java.util.concurrent.ConcurrentHashMap<>();",
+                "    private final Object2ObjectMap<String, PlayerTeam> teamsByPlayer = new Object2ObjectOpenHashMap<>();" to
+                    "    private final java.util.Map<String, PlayerTeam> teamsByPlayer = new java.util.concurrent.ConcurrentHashMap<>();",
+
+                // EXP7Plus: ConcurrentHashMap is not null-tolerant while the original OpenHashMap
+                // accepted null keys (vanilla calls these getters with null); guard both getters.
+                "    public @Nullable PlayerTeam getPlayerTeam(final String name) {\n" +
+                    "        return this.teamsByName.get(name);\n" +
+                    "    }" to
+                    "    public @Nullable PlayerTeam getPlayerTeam(final String name) {\n" +
+                    "        // AzureBranches EXP7Plus: null guard for ConcurrentHashMap\n" +
+                    "        if (name == null) { return null; }\n" +
+                    "        return this.teamsByName.get(name);\n" +
+                    "    }",
+                "    public @Nullable PlayerTeam getPlayersTeam(final String name) {\n" +
+                    "        return this.teamsByPlayer.get(name);\n" +
+                    "    }" to
+                    "    public @Nullable PlayerTeam getPlayersTeam(final String name) {\n" +
+                    "        // AzureBranches EXP7Plus: null guard for ConcurrentHashMap\n" +
+                    "        if (name == null) { return null; }\n" +
+                    "        return this.teamsByPlayer.get(name);\n" +
+                    "    }"
             )
 
             // EXP7Plus: Folia upstream commented out the join-time scoreboard sync in
@@ -1143,11 +1171,12 @@ tasks.register("buildFolia") {
 
             // EXP7Plus: Folia also hard-disabled Entity.getTeam() ("region threading" -
             // it reads the server-global scoreboard). That breaks /teammsg and every
-            // team-based semantic (isAlliedTo/getTeamColor/visibility checks). Restore
-            // the real lookup on the global tick thread only; regional reads keep
-            // returning null to preserve Folia's data-race protection.
+            // team-based semantic (isAlliedTo/getTeamColor/visibility checks). With the
+            // team maps now concurrent (Scoreboard.java transform) the lookup is safe
+            // on any thread - the disable is fully lifted; the Paper perf gate for
+            // non-player entities (allowNonPlayerEntitiesOnScoreboards) stays.
             val entityFile = File(minecraftSrc, "net/minecraft/world/entity/Entity.java")
-            transformSource(entityFile, "Entity.java (EXP7Plus team lookup allowed on global tick)",
+            transformSource(entityFile, "Entity.java (EXP7Plus team lookup thread-safe)",
                 "    public @Nullable PlayerTeam getTeam() {\n" +
                     "        // Folia start - region threading\n" +
                     "        if (true) {\n" +
@@ -1158,12 +1187,9 @@ tasks.register("buildFolia") {
                     "        return this.level().getScoreboard().getPlayersTeam(this.getScoreboardName());\n" +
                     "    }" to
                     "    public @Nullable PlayerTeam getTeam() {\n" +
-                    "        // AzureBranches EXP7Plus: restore the Folia-disabled team lookup, but only on\n" +
-                    "        // the global tick thread (the scoreboard is server-global data; regional reads\n" +
-                    "        // keep returning null to preserve Folia's data-race protection).\n" +
-                    "        if (!io.papermc.paper.threadedregions.RegionizedServer.isGlobalTickThread()) {\n" +
-                    "            return null;\n" +
-                    "        }\n" +
+                    "        // AzureBranches EXP7Plus: the scoreboard team maps are concurrent\n" +
+                    "        // (ConcurrentHashMap, see Scoreboard.java transform), so this lookup is\n" +
+                    "        // safe on any Folia thread - the hard disable is fully lifted.\n" +
                     "        if (!this.level().paperConfig().scoreboards.allowNonPlayerEntitiesOnScoreboards && !(this instanceof Player)) { return null; } // Paper - Perf: Disable Scoreboards for non players by default\n" +
                     "        return this.level().getScoreboard().getPlayersTeam(this.getScoreboardName());\n" +
                     "    }"
