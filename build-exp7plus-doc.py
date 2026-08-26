@@ -176,10 +176,15 @@ para("(1) azurepatches-src/Commands.java 恢复 TeamCommand 与 TeamMsgCommand �
      "**threading 细节（实测驱动）**：成员 holder 的解析（ScoreHolderArgument 选择器）必须在**源（区域）线程**完成——"
      "选择器遍历实体是区域数据，放全局 tick 任务内会触发 Folia 的 `getEntities asynchronously` 线程检查（非玩家实体"
      "分队验证时实际捕获）；解析后的纯团队操作才进全局 tick，与 EXP6Plus ScoreboardCommand 的源线程解析模式一致。")
-para("4.3　getTeam 恢复：全局 tick 守卫", size=12, bold_all=True, align="left")
-para("以 transformSource 锚点把 Folia 禁用块替换为：**全局 tick 线程上执行真实查询**（"
-     "`if (!RegionizedServer.isGlobalTickThread()) return null;`），区域线程保持返回 null——精确保留 Folia 的"
-     "数据竞争防护，同时让所有「全局 tick 上下文」的团队语义（/teammsg 的入队判定、团队命令的成员遍历等）恢复正确。")
+para("4.3　getTeam 全量解除：团队数据并发化", size=12, bold_all=True, align="left")
+para("最初以「全局 tick 守卫」恢复（区域线程仍 null），但选择器 team= 过滤在**区域线程**读 getTeam——守卫版仍然匹配不到"
+     "（@e[team=…] 实测为空）。最终方案改为**数据层并发化 + 全量解除**：(1) Scoreboard 的 teamsByName/teamsByPlayer "
+     "改为 ConcurrentHashMap（单写者=全局 tick，任意 Folia 线程可安全读；建议/广播的弱一致迭代可接受）；"
+     "(2) getPlayerTeam/getPlayersTeam 加 null 守卫——ConcurrentHashMap 不接受 null 键，而原 OpenHashMap 容忍（"
+     "vanilla tick 路径实测调用 getPlayerTeam(null)，第一时间暴露出区域 tick NPE 并修复）；"
+     "(3) Entity.getTeam() 移除线程守卫，**任何线程执行真实查询**（非玩家实体仍保留 Paper 的"
+     " allow-non-player-entities-on-scoreboards 性能门控）。语义：读者与全局 tick 写者收敛于最新团队状态，"
+     "可能短暂滞后——与数据包广播的最终一致性语义一致。")
 para("结果：三处禁用全部以「恢复 + 契约保留」的方式解决，不改任何 vanilla 行为语义。")
 
 # ---------------- 五 ----------------
@@ -212,7 +217,10 @@ para("· 登录同步回归：重进后 0x6D SetPlayerTeam（含 probe、testtea
 para("· **非玩家实体分队（原版语义）**：`/team join mobs @e[type=zombie,distance=..20]` 成功——0x6D SetPlayerTeam "
      "成员列表**携带实体 UUID**（新召唤僵尸 + 既有僵尸均入列）、`team list mobs` 显示成员、零线程异常；"
      "服务端团队语义仍受 Paper 配置 `scoreboards.allow-non-player-entities-on-scoreboards`（默认 false）门控——"
-     "实体入队与客户端队色映射不受影响（与 Paper 性能默认一致），开启该配置即获得完整服务端语义。", space_after=3)
+     "实体入队与客户端队色映射不受影响（与 Paper 性能默认一致），开启该配置即获得完整服务端语义；", space_after=3)
+para("· **@e[team=…] 选择器**：/team join pteam2 @e[team=pteam,type=player]（默认配置，区域线程解析）与"
+     "/team join emob2 @e[team=emob,type=zombie,distance=..30]（开启实体门控后）均成功——0x6D 成员迁移包"
+     "+ 成功反馈齐全，零异常；修复前守卫版 getTeam 使该过滤恒为空集。", space_after=3)
 para("（注：26.1 的 SystemChat 组件以 NBT 流编解码，合成客户端的 JSON 解析不适用——验证一律以字节级 marker/转义键字段为准。）")
 para("5.4　构建与运行", size=12, bold_all=True, align="left")
 para("已知陷阱再次命中并规避：buildFolia 有 folia-paperclip.jar 缓存（`Folia cached (57 MB)`）会跳过整个"
