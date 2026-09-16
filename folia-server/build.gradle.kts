@@ -1194,6 +1194,28 @@ tasks.register("buildFolia") {
                     "        return this.level().getScoreboard().getPlayersTeam(this.getScoreboardName());\n" +
                     "    }"
             )
+
+            // Pearl loader fix (Folia upstream issue #421 / PR #423).
+            //
+            // ThrownEnderpearl.tick() discards the pearl when the owner looks
+            // dead:  if (owner instanceof ServerPlayer sp && !owner.isAlive() && ...)
+            // Entity.isAlive() is only "!isRemoved()" in 26.1, and a Folia player
+            // is briefly isRemoved() while changing dimension (the old level runs
+            // removePlayerImmediately(CHANGED_DIMENSION) before the new level's
+            // addDuringTeleport is queued - ServerPlayer#placeSingleSync). Since
+            // findOwnerIncludingDeadPlayer only falls back to the player list when
+            // getEntity(uuid) misses, it hands back that removed instance and the
+            // pearl despawns itself - a stasis chamber dies on every portal trip
+            // or cross-dimension /tpa. Health is synced entity data, so test it
+            // instead of the removal flag.
+            val enderPearlFile = File(minecraftSrc,
+                "net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java")
+            transformSource(enderPearlFile, "ThrownEnderpearl.java (Folia #421 pearl survives dimension change)",
+                "            if (owner instanceof ServerPlayer serverPlayer\n" +
+                    "                && !owner.isAlive()" to
+                    "            if (owner instanceof ServerPlayer serverPlayer\n" +
+                    "                && serverPlayer.getHealth() <= 0.0f // AzureBranches: Folia #421 - isAlive() is !isRemoved(), false while the owner changes dimension"
+            )
         }
 
         // AzureBranches: overlay modified/added Minecraft sources after
@@ -1285,7 +1307,10 @@ tasks.register("mergeJar") {
     doLast {
         val src = foliaJar.get().asFile
         val classes = sourceSets.main.get().output.classesDirs.singleFile
-        val dest = layout.buildDirectory.file("libs/azurebranches-server-${project.version}-EXP7Plus.jar").get().asFile
+        // Deployment artifact name. Must stay in sync with the JAR variable in
+        // the remote admin script (AzureServer/mc.sh): the server refuses to
+        // start if the two disagree, so rename both together.
+        val dest = layout.buildDirectory.file("libs/EXP7-0916.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()
