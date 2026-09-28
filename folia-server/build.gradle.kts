@@ -1259,15 +1259,23 @@ tasks.register("buildFolia") {
                     "                    }\n" +
                     "                }" to
                     "                if (this.isWorldLimited()) {\n" +
-                    "                    this.addEntities(result, sender.getLevel(), absoluteAabb, predicate);\n" +
+                    "                    // AzureBranches (issue #2): a region thread owns only part of ONE\n" +
+                    "                    // world, so \"this world\" is not enough - the query box may sit in a\n" +
+                    "                    // region another thread owns (seen live: thread owned overworld\n" +
+                    "                    // region [41,5] while the box was at chunk [158,90], same world).\n" +
+                    "                    // Skip the query instead of throwing, matching the non-world-limited\n" +
+                    "                    // path below.\n" +
+                    "                    if (absoluteAabb != null\n" +
+                    "                        ? ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(sender.getLevel(), absoluteAabb)\n" +
+                    "                        : ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(sender.getLevel(), CoordinateUtils.getChunkCoordinate(pos.x), CoordinateUtils.getChunkCoordinate(pos.z))) {\n" +
+                    "                        this.addEntities(result, sender.getLevel(), absoluteAabb, predicate);\n" +
+                    "                    }\n" +
                     "                } else {\n" +
                     "                    for (ServerLevel levelx : sender.getServer().getAllLevels()) {\n" +
-                    "                        // AzureBranches (issue #2): a region thread owns exactly one\n" +
-                    "                        // world's regions. A non-world-limited selector has no\n" +
-                    "                        // spatial filter, so it would otherwise run\n" +
-                    "                        // Level.getEntities -> ensureTickThread against every other\n" +
-                    "                        // world and throw \"Cannot getEntities asynchronously\" on the\n" +
-                    "                        // region thread. Skip the levels this thread cannot read.\n" +
+                    "                        // AzureBranches (issue #2): same rule for the other worlds - a\n" +
+                    "                        // non-world-limited selector has no spatial filter, so it would\n" +
+                    "                        // otherwise run Level.getEntities -> ensureTickThread against\n" +
+                    "                        // every other world and throw on the region thread.\n" +
                     "                        if (absoluteAabb != null\n" +
                     "                            ? !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(levelx, absoluteAabb)\n" +
                     "                            : !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(levelx, CoordinateUtils.getChunkCoordinate(pos.x), CoordinateUtils.getChunkCoordinate(pos.z))) {\n" +
