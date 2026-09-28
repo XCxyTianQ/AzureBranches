@@ -1216,6 +1216,67 @@ tasks.register("buildFolia") {
                     "            if (owner instanceof ServerPlayer serverPlayer\n" +
                     "                && serverPlayer.getHealth() <= 0.0f // AzureBranches: Folia #421 - isAlive() is !isRemoved(), false while the owner changes dimension"
             )
+
+            // Cross-region @e selectors (issue #2, "Execute命令报错").
+            //
+            // EntitySelector.findEntities() has two paths:
+            //   worldLimited  -> addEntities(sender.getLevel(), ...)
+            //   otherwise     -> for (ServerLevel l : sender.getServer().getAllLevels()) addEntities(l, ...)
+            // Only x/y/z, dx/dy/dz and distance set worldLimited; a bare
+            // @e[tag=...,type=...] does NOT. Level.getEntities() then runs
+            // TickThread.ensureTickThread(level, ...) for every OTHER world, and a
+            // region thread owns exactly one world's regions - so the query throws
+            // "Cannot getEntities asynchronously".
+            //
+            // That is what breaks the ClosureShop command block chain:
+            //   execute as @e[tag=ClosureShop,tag=Closure_BM_Shop,tag=!Repair] at @s
+            //     unless entity @e[distance=0..2,type=minecraft:armor_stand,tag=ClosureShopTitle1]
+            //       run summon ...
+            // The INNER selector carries `distance=0..2` and is world-limited; the
+            // OUTER one carries only tags, so it iterates the nether/end and throws
+            // on every tick. Verified against the real 26.1.2 classes:
+            //   @e[tag=...,tag=...,tag=!...]                 worldLimited=false
+            //   @e[x=1,y=2,z=3] / @e[dx=..] / @e[distance=..] worldLimited=true
+            //
+            // Fix: on the non-world-limited path, skip any level the current region
+            // thread does not own. Those entities were never reachable from this
+            // thread, and for a non-spatial selector vanilla already cannot match
+            // them (a tag/name/type filter that would have matched an entity in
+            // another world is exactly the case Folia forbids reading). This keeps
+            // every spatial query bit-identical and stops the region-crashing throw.
+            val entitySelectorFile = File(minecraftSrc,
+                "net/minecraft/commands/arguments/selector/EntitySelector.java")
+            transformSource(entitySelectorFile, "EntitySelector.java (issue #2 cross-region @e)",
+                // CoordinateUtils is not imported by the upstream file.
+                "import net.minecraft.util.CompilableString;" to
+                    "import ca.spottedleaf.moonrise.common.util.CoordinateUtils;\n" +
+                    "import net.minecraft.util.CompilableString;",
+                "                if (this.isWorldLimited()) {\n" +
+                    "                    this.addEntities(result, sender.getLevel(), absoluteAabb, predicate);\n" +
+                    "                } else {\n" +
+                    "                    for (ServerLevel levelx : sender.getServer().getAllLevels()) {\n" +
+                    "                        this.addEntities(result, levelx, absoluteAabb, predicate);\n" +
+                    "                    }\n" +
+                    "                }" to
+                    "                if (this.isWorldLimited()) {\n" +
+                    "                    this.addEntities(result, sender.getLevel(), absoluteAabb, predicate);\n" +
+                    "                } else {\n" +
+                    "                    for (ServerLevel levelx : sender.getServer().getAllLevels()) {\n" +
+                    "                        // AzureBranches (issue #2): a region thread owns exactly one\n" +
+                    "                        // world's regions. A non-world-limited selector has no\n" +
+                    "                        // spatial filter, so it would otherwise run\n" +
+                    "                        // Level.getEntities -> ensureTickThread against every other\n" +
+                    "                        // world and throw \"Cannot getEntities asynchronously\" on the\n" +
+                    "                        // region thread. Skip the levels this thread cannot read.\n" +
+                    "                        if (absoluteAabb != null\n" +
+                    "                            ? !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(levelx, absoluteAabb)\n" +
+                    "                            : !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(levelx, CoordinateUtils.getChunkCoordinate(pos.x), CoordinateUtils.getChunkCoordinate(pos.z))) {\n" +
+                    "                            continue;\n" +
+                    "                        }\n" +
+                    "                        this.addEntities(result, levelx, absoluteAabb, predicate);\n" +
+                    "                    }\n" +
+                    "                }"
+            )
         }
 
         // AzureBranches: overlay modified/added Minecraft sources after
@@ -1310,7 +1371,7 @@ tasks.register("mergeJar") {
         // Deployment artifact name. Must stay in sync with the JAR variable in
         // the remote admin script (AzureServer/mc.sh): the server refuses to
         // start if the two disagree, so rename both together.
-        val dest = layout.buildDirectory.file("libs/EXP7-0916.jar").get().asFile
+        val dest = layout.buildDirectory.file("libs/EXP7-0928.jar").get().asFile
         dest.parentFile.mkdirs()
         Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val pb = ProcessBuilder("jar", "uf", dest.absolutePath, "-C", classes.absolutePath, ".").inheritIO()
